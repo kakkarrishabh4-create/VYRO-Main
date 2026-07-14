@@ -31,3 +31,12 @@ export { NutritionBar } from './NutritionBar';
 export { StreakBadge } from './StreakBadge';
 export { HistoryThread } from './HistoryThread';
 export type { HistoryEntry, HistoryStatus } from './HistoryThread';
+
+// Workout logging primitives
+export { NumberStepper } from './NumberStepper';
+export { RPESelector } from './RPESelector';
+export { RestTimer } from './RestTimer';
+export { SetRow } from './SetRow';
+export type { SetState } from './SetRow';
+export { ExerciseRow } from './ExerciseRow';
+export type { LastLogSet } from './ExerciseRow';
