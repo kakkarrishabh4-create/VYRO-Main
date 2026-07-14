@@ -1,0 +1,30 @@
+{
+  "summary": "Iteration 3 (VYRO home screen) tested end-to-end. Backend: 10/10 pytest tests pass — /today contract, no _id leakage, 404 on unknown profile, session seeding (5-day history, statuses in {workout,rest,missed}), streak logic (workout+rest active, missed breaks), nutrition targets echo payload. Frontend: /home?profileId=<valid> renders home-root with every required testID (home-greeting, home-workout + name/exercises/duration/start, home-nutrition + cal-consumed/target/remaining + protein/carbs/fat, home-history with 5 history-row-<date> entries, home-streak+home-streak-value since streak=5). home-empty renders when no profileId + empty AsyncStorage and its Start onboarding button routes to welcome-root. home-error renders on invalid profileId (shows HTTP 404 + Retry). home-workout-start navigates to /workout/today with correct params. StreakBadge <3 hidden path verified via code review (StreakBadge.tsx L23 returns null). Minor non-blocking: Inter font files fail to decode in Expo web preview (OTS parsing error, glyph fallback works). Require-cycle warning src/components/index.ts <-> OptionCard.tsx.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "/home", "issues": ["Inter font files return HTML instead of TTF from /assets/?unstable_path=... — 'OTS parsing error: invalid sfntVersion' repeated for every weight. UI falls back to system font; typography intent is degraded on web preview. Native builds unaffected but worth verifying assets/fonts route."]}
+    ],
+    "react_native_issues": [
+      {"component": "src/components/index.ts", "issue": "Require cycle: src/components/index.ts -> src/components/OptionCard.tsx -> src/components/index.ts. Reference: /app/frontend/src/components/OptionCard.tsx"}
+    ]
+  },
+  "test_report_links": ["/app/backend/tests/test_vyro_today.py", "/app/test_reports/pytest/iter3.xml"],
+  "action_items": [
+    "Optional: silence require-cycle warning by importing from concrete sibling files instead of the barrel index in OptionCard.tsx.",
+    "Optional: investigate why /assets/?unstable_path=./assets/fonts/Inter-*.ttf serves non-TTF content in the web preview (Expo web asset route). Not blocking iteration 3."
+  ],
+  "critical_code_review_comments": [
+    "server.py:165 workout_days = sorted(rnd.sample(all_slots, k=min(target, len(all_slots)) - 1 if target > 1 else 1)) — for training_days=1 seeds exactly 1 workout day; for training_days>=2 seeds min(target,5)-1 workout days. This is an off-by-one relative to the doc-string ('mostly workouts on training days'). Not a spec violation but worth confirming intent.",
+    "home.tsx greeting is hard-coded to 'Morning, <name>.' regardless of local hour. Consider time-of-day aware greeting later.",
+    "StreakBadge correctly returns null for days<3 (verified by inspection). Handled cleanly."
+  ],
+  "updated_files": ["/app/backend/tests/test_vyro_today.py"],
+  "success_rate": {"backend": "100%", "frontend": "100%"},
+  "seed_data_creation": "Created two TEST_-prefixed profiles via POST /api/profiles (TEST_Alex Rivera, TEST_Session Seed, TEST_Frontend User). Each seeds 5 sessions in db.sessions.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Backend pytest lives at /app/backend/tests/test_vyro_today.py — run with EXPO_PUBLIC_BACKEND_URL set. Frontend home flow validated by pointing browser at /home?profileId=<id from POST /api/profiles>. Streak<3 path only reachable via code review or by manually inserting a session with status='missed' at today-1 in db.sessions."
+}

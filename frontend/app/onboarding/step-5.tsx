@@ -23,8 +23,10 @@ import {
   useOnboarding,
 } from '@/src/context/OnboardingContext';
 import { colors, spacing } from '@/src/theme';
+import { storage } from '@/src/utils/storage';
 
 const API_URL = process.env.EXPO_PUBLIC_BACKEND_URL;
+const PROFILE_ID_KEY = 'vyro.profile.id';
 
 export default function Step5() {
   const router = useRouter();
@@ -82,6 +84,7 @@ export default function Step5() {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const created = await res.json();
+      await storage.setItem(PROFILE_ID_KEY, created.id);
       reset();
       router.replace({
         pathname: '/home',

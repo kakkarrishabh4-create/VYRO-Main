@@ -1,8 +1,5 @@
 /**
  * VYRO — UI primitives barrel export.
- *
- * Import from here so screens stay tidy:
- *   import { Button, Card, Heading, BodyText, Numeric, Thread } from '@/src/components';
  */
 
 export { Button } from './Button';
@@ -27,3 +24,10 @@ export type { TextFieldProps } from './TextField';
 export { UnitToggle } from './UnitToggle';
 export { Stepper } from './Stepper';
 export { StepHeader } from './StepHeader';
+
+// Home screen primitives
+export { WorkoutHero } from './WorkoutHero';
+export { NutritionBar } from './NutritionBar';
+export { StreakBadge } from './StreakBadge';
+export { HistoryThread } from './HistoryThread';
+export type { HistoryEntry, HistoryStatus } from './HistoryThread';

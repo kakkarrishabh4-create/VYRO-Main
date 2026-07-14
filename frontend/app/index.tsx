@@ -1,14 +1,14 @@
 /**
  * VYRO — Welcome / entry.
  *
- * Not a full landing — just enough to send new clients into the onboarding
- * flow. Once real screens (dashboard, timeline, coach chat) are built,
- * this file will branch: existing profile → /home, no profile → /onboarding.
+ * Two paths:
+ *  • First launch → Onboarding
+ *  • Returning client (profile id in storage) → Home
  */
 
 import { useRouter } from 'expo-router';
-import React from 'react';
-import { StyleSheet, View } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { ActivityIndicator, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import {
@@ -17,9 +17,43 @@ import {
   Heading,
 } from '@/src/components';
 import { colors, spacing } from '@/src/theme';
+import { storage } from '@/src/utils/storage';
+
+const PROFILE_ID_KEY = 'vyro.profile.id';
 
 export default function Index() {
   const router = useRouter();
+  const [checking, setChecking] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const existing = await storage.getItem<string>(PROFILE_ID_KEY, '');
+      if (cancelled) return;
+      if (existing && existing.length > 0) {
+        router.replace({
+          pathname: '/home',
+          params: { profileId: existing },
+        });
+        return;
+      }
+      setChecking(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
+
+  if (checking) {
+    return (
+      <SafeAreaView style={styles.safe} testID="welcome-checking">
+        <View style={styles.center}>
+          <ActivityIndicator color={colors.moss} />
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={styles.safe} testID="welcome-root">
       <View style={styles.container}>
@@ -28,7 +62,7 @@ export default function Index() {
             VYRO
           </BodyText>
         </View>
-        <View style={styles.center}>
+        <View style={styles.centerCol}>
           <Heading variant="display" tone="bone">
             Kept, not{'\n'}crammed.
           </Heading>
@@ -60,18 +94,19 @@ const styles = StyleSheet.create({
     paddingHorizontal: spacing.lg,
     paddingVertical: spacing.xl,
   },
-  top: {
-    // header
+  top: {},
+  centerCol: {
+    flex: 1,
+    justifyContent: 'center',
   },
   center: {
     flex: 1,
     justifyContent: 'center',
+    alignItems: 'center',
   },
   tag: {
     marginTop: spacing.md,
     maxWidth: 320,
   },
-  bottom: {
-    // footer button
-  },
+  bottom: {},
 });
