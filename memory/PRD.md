@@ -6,74 +6,66 @@ VYRO is a mobile app for a transformation coach's clients to track workouts and 
 ## Delivered Milestones
 
 ### 1. Design System Foundation
-Colors, three-family typography (Fraunces / Inter / IBM Plex Mono), 8pt spacing, 8px radius, hairline-only elevation, `<Thread>` signature line, Feather line-icon lock. Source of truth: `/app/design_guidelines.json` + `/app/frontend/src/theme/`.
+Colors (Ink / Bone / Moss / Brass / Slate), three-family typography (Fraunces / Inter / IBM Plex Mono), 8pt spacing, 8px radius, hairline-only elevation, signature `<Thread>` line, Feather line-icon lock. Source: `/app/design_guidelines.json` + `/app/frontend/src/theme/`.
 
 ### 2. Onboarding Flow (5 steps)
-Multi-step wizard collecting basic info / goal / lifestyle / training background, then computing daily calorie & macro targets via Mifflin-St Jeor. Persists to backend and stores profile id in AsyncStorage under `vyro.profile.id`.
+Wizard collects basic info → goal → lifestyle → training background, then computes daily calorie & macro targets via Mifflin-St Jeor, POSTs to `/api/profiles`, and stores the profile id in AsyncStorage under `vyro.profile.id`.
 
-### 3. Client Home Screen (this iteration)
-Route: `/home?profileId=<id>` (also resolves via AsyncStorage on cold start). Journal layout, top to bottom:
+### 3. Client Home Screen
+Route `/home`. Journal layout: greeting + date, conditional Brass streak badge (≥3), today's workout hero with Moss "Start workout", compact horizontal nutrition bar, and last-5-days `<Thread>`.
 
-1. **Greeting** — `Weekday, Month D` label in Slate + `Morning, <first-name>.` in Fraunces
-2. **Streak badge** — Brass, `<Zap>` icon + `Nd day streak`, rendered ONLY when streak ≥ 3
-3. **Today's workout hero** — `TODAY'S SESSION` label + workout name (Fraunces h1) + `<n> exercises · <m> min` meta + full-width Moss "Start workout" button
-4. **Compact nutrition bar** — `TODAY'S FUEL` + `consumed / target kcal` (IBM Plex Mono) + remaining + main Moss track + 3 slim macro tracks (protein / carbs / fat) with mono numbers
-5. **Last-5-days thread** — `LAST 5 DAYS` label + `<Thread>` with 5 `<ThreadEntry>` rows: day label + date + workout name / "Rest day" / "Missed" + check / moon / x icon in the corresponding tone
+### 4. Workout Detail + Inline Logging + Summary (this iteration)
 
-**Additional plumbing**
-- `/` (welcome) — auto-redirects to `/home` if a profile id is in storage; otherwise shows onboarding CTA
-- `/workout/today` — placeholder detail page reached from the Start button; will host set-by-set logging next
-- Pull-to-refresh on home, plus explicit empty (`home-empty`) and error (`home-error`) states with retry
+**Route `/workout/today`**
+- Header: `Today's session` label + workout name in Fraunces + exercises count + duration.
+- **Exercise list** — ordered as they'll be performed. Each row:
+  - Exercise name (Fraunces h3)
+  - `<target_sets> × <target_reps>` (Plex Mono)
+  - `Last time · <mono numbers>` directly beneath (from most recent same-name log; `—` if none)
+- **Inline expansion** — tap an exercise header → `LayoutAnimation.easeInEaseOut` reveals the `SetRow` list (NOT a route change).
+- **SetRow** — one per set. Contains `Weight (kg|lb)` NumberStepper (step 2.5 kg / 5 lb), `Reps` NumberStepper, RPE 1–10 dot selector (optional, tap same value to clear), and a subtle Moss check button. **Completing a set changes ONLY the check button's fill/border** — the rest of the row does not shift color, per brief.
+- **Add set** secondary button appends a new set (weight/reps prefilled from last set).
+- **Rest timer** — mounts as a bottom overlay the moment a set is checked; mono `M:SS` countdown starting from that exercise's `rest_seconds` (e.g. 2:30 for bench). `+15s` extends, `Skip` dismisses. Un-completing does NOT re-trigger.
+- **Totals band + Finish** — live "Sets completed" and "Volume" in Plex Mono; `Finish workout` disabled while 0 sets are completed.
 
-### Backend
-- `POST /api/profiles` — validates, stores profile, **seeds 5 recent days** of `sessions` (workout / rest / missed distribution derived from `training_days`, deterministic per profile id)
-- `GET /api/profiles/{id}` — profile fetch
-- `GET /api/profiles/{id}/today` — returns:
-  ```
-  {profile_id, name, today_date,
-   today_workout {name, exercises, duration_min},
-   today_nutrition {calories_consumed/target, protein_consumed/target,
-                    carbs_consumed/target, fat_consumed/target},
-   streak, history[]}
-  ```
-- Today's workout picked deterministically from a per-goal template pool
-- Nutrition consumed: seeded partial day (30–65% of target) until meal logging lands
-- Streak logic: `workout` + `rest` count as active; `missed` breaks the streak
-- All Mongo responses project out `_id`
+**Route `/workout/summary`**
+- Reads from AsyncStorage `vyro.workout.lastSummary`.
+- Fraunces workout name + `SESSION LOGGED` label + Moss check icon in the corner.
+- `TOTAL VOLUME` — Plex Mono large number + weight unit + comparison delta.
+- `SETS COMPLETED` — same treatment.
+- **Delta indicators** — arrow-up **Moss** for improvement, arrow-down **Slate** for regression, minus **Slate** for flat, `First time` label when no prior data. **Never red/green** — the palette stays consistent.
+- Breakdown per exercise: name + `<n> sets` + volume.
+- `Back to today` returns to `/home`.
 
-## Reusable Primitives Added This Iteration
+### Backend (this iteration)
+- `GET /api/profiles/{id}/workouts/today` → `WorkoutDetail{workout_name, weight_unit, duration_min, exercises[{id, name, target_sets, target_reps, rest_seconds, starter_weight, last_log?}]}`. Uses `WORKOUT_EXERCISES` template map keyed by workout name; last-log context comes from the most recent same-name `logged_workouts` doc.
+- `POST /api/profiles/{id}/workouts/complete` → persists `LoggedWorkout`, upserts today's `sessions` row to `workout`, and returns `WorkoutCompleteResponse` with total volume, sets completed, per-exercise breakdown, and comparison deltas (`volume_delta_pct`, `sets_delta`) against the previous same-name workout.
+- Profile creation now also seeds one prior logged workout per unique workout name in the recent session history — so the "Last time" line has real numbers from day one.
+- **Bug regression covered**: target-rep parsing takes only the first digit run so `"6-8"` → 6 (never 68).
+
+### Verified (Iteration 4)
+- 11/11 pytest suite `/app/backend/tests/test_vyro_workout.py`
+- Full Playwright flow: expand → set values → check → rest timer with skip/+15s → un-check does NOT re-trigger → finish → summary with slate down-arrow (91.6% regression vs seeded) → back to home
+- No `_id` leakage; no red/green anywhere in the summary flow
+
+## New Primitives Added This Iteration
 `/app/frontend/src/components/`
-- `WorkoutHero` — journal-feel hero (no card border)
-- `NutritionBar` — compact calorie row + 3 slim macro tracks
-- `StreakBadge` — Brass, self-hiding under threshold
-- `HistoryThread` — the Thread applied to N days of activity with day/date/status rows
-
-## Verified (Iteration 3)
-- 10/10 pytest backend suite in `/app/backend/tests/test_vyro_today.py`
-- Frontend Playwright walk-through of home + workout + empty + error states
-- StreakBadge threshold behavior confirmed
-- No `_id` leakage anywhere
+- `NumberStepper` — large tappable +/− with mono readout
+- `RPESelector` — 10-dot row, color-only selection
+- `RestTimer` — bottom overlay countdown with +15s / Skip
+- `SetRow` — set state row (weight + reps + RPE + subtle check)
+- `ExerciseRow` — collapsed context + inline expansion
 
 ## Files
 ```
-/app/backend/server.py                         ← + /today endpoint, session seeding
-/app/frontend/app/index.tsx                    ← auto-redirect welcome
-/app/frontend/app/home.tsx                     ← client home (this iteration)
-/app/frontend/app/workout/today.tsx            ← placeholder detail
-/app/frontend/app/onboarding/…                 ← unchanged from iteration 2
-/app/frontend/src/components/
-  ├─ WorkoutHero.tsx
-  ├─ NutritionBar.tsx
-  ├─ StreakBadge.tsx
-  ├─ HistoryThread.tsx
-  └─ …previous primitives
-/app/frontend/src/context/OnboardingContext.tsx
-/app/frontend/src/theme/                        ← tokens
+/app/backend/server.py                          ← /workouts/today, /workouts/complete, seed prior log
+/app/frontend/app/workout/today.tsx             ← detail + inline logging + rest timer
+/app/frontend/app/workout/summary.tsx           ← end-of-workout summary with Moss/Slate deltas
+/app/frontend/src/components/{NumberStepper,RPESelector,RestTimer,SetRow,ExerciseRow}.tsx
 ```
 
 ## Next Steps
-- Real meal-log screen (bottom sheet, mono macro totals rolling up into `NutritionBar`)
-- Set-by-set workout logger replacing `/workout/today` placeholder
-- History timeline (full page, using `<Thread>` beyond 5 days)
+- Meal-logging bottom sheet flowing into `NutritionBar`
+- History timeline (full page — `<Thread>` beyond 5 days)
 - Coach chat inbox
 - Weekly / monthly reflection summaries
