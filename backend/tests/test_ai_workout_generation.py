@@ -336,3 +336,148 @@ class TestEndpointsShapePreserved:
             assert "raw_response" not in body
             assert "\"prompt\"" not in body
             assert "fallback_used" not in body
+
+
+# ---------- Unit: _get_or_generate_plan SUCCESS path (mocked LLM) ----------
+class TestGetOrGeneratePlanSuccessPath:
+    """
+    The rest of the suite exercises fallback (LLM unavailable / budget=0).
+    This test locks the AI success path: when _generate_workout_for returns
+    a valid plan, _get_or_generate_plan must return it AS-IS and record
+    fallback_used=False in the audit trail. Regression coverage for the
+    NameError-on-allowed_categories bug that landed silently because the
+    broad except-clause was swallowing it into the fallback path.
+    """
+
+    def test_valid_ai_plan_bypasses_fallback(self, api, monkeypatch):
+        from pymongo import MongoClient
+        # Import inside the test so we're patching the same module reference
+        # server.py uses at call time.
+        import server as srv
+
+        # 1) Create a profile — this seeds sessions/logged workouts as usual.
+        p = _make_profile(api, {"name": "TEST_ai_success_path"})
+
+        # 2) Purge any generated_plans doc the profile-create flow might
+        #    have written (it shouldn't yet — only the /today or
+        #    /workouts/today endpoint triggers generation).
+        c = MongoClient('mongodb://localhost:27017')
+        db = c['test_database']
+        db.generated_plans.delete_many({"profile_id": p["id"]})
+
+        # 3) Mock _generate_workout_for to return a valid plan without
+        #    touching the network. The plan uses a real category name and
+        #    real exercises so validation should pass cleanly.
+        canned_plan = {
+            "name": "Push · Chest & Shoulders",
+            "duration_min": 55,
+            "exercises": [
+                {"name": "Barbell Bench Press", "target_sets": 4,
+                 "target_reps": "6-8", "rest_seconds": 150,
+                 "starter_weight": 65.0},
+                {"name": "Overhead Press", "target_sets": 3,
+                 "target_reps": "8", "rest_seconds": 120,
+                 "starter_weight": 40.0},
+                {"name": "Incline Dumbbell Press", "target_sets": 3,
+                 "target_reps": "10", "rest_seconds": 90,
+                 "starter_weight": 22.5},
+                {"name": "Triceps Pushdown", "target_sets": 3,
+                 "target_reps": "12", "rest_seconds": 60,
+                 "starter_weight": 25.0},
+            ],
+        }
+
+        async def fake_generate(profile, day_offset, recent_logs):
+            return {
+                "plan": canned_plan,
+                "prompt": "TEST_PROMPT",
+                "raw_response": "TEST_RAW_RESPONSE",
+            }
+
+        # Patch on the module the endpoint imports from.
+        monkeypatch.setattr(srv, "_generate_workout_for", fake_generate)
+
+        # We're calling the endpoint against the LIVE server process, which
+        # loaded server.py at startup — monkeypatch won't reach it. So we
+        # exercise _get_or_generate_plan directly here via asyncio.
+        import asyncio
+        profile_doc = db.profiles.find_one({"id": p["id"]}, {"_id": 0})
+        profile = srv.Profile(**profile_doc)
+
+        result = asyncio.get_event_loop().run_until_complete(
+            srv._get_or_generate_plan(profile, day_offset=0)
+        )
+
+        # ---- Assertions on the returned plan ----
+        assert result["name"] == "Push · Chest & Shoulders", (
+            f"expected canned plan name, got {result['name']!r} — "
+            "AI success path silently fell back to template"
+        )
+        assert result["duration_min"] == 55
+        assert len(result["exercises"]) == 4
+        assert result["exercises"][0]["name"] == "Barbell Bench Press"
+        assert result["exercises"][0]["starter_weight"] == 65.0
+
+        # ---- Assertions on the audit trail ----
+        docs = list(db.generated_plans.find(
+            {"profile_id": p["id"], "day_offset": 0}, {"_id": 0}
+        ))
+        assert len(docs) == 1, f"expected 1 audit doc, got {len(docs)}"
+        d = docs[0]
+        assert d["fallback_used"] is False, (
+            f"fallback_used should be False on success path; got {d['fallback_used']} "
+            f"(validation_error={d.get('validation_error')!r}). This is the exact "
+            "regression this test guards against."
+        )
+        assert d.get("validation_error") is None
+        assert d["prompt"] == "TEST_PROMPT"
+        assert d["raw_response"] == "TEST_RAW_RESPONSE"
+        assert d["plan"] == canned_plan
+
+    def test_invalid_ai_plan_falls_through_to_template(self, api, monkeypatch):
+        """The other side of the same guard: if the mocked AI returns a
+        plan that fails validation (invented exercise name), we MUST fall
+        back to the template AND record validation_error='validation_failed'."""
+        from pymongo import MongoClient
+        import server as srv
+        import asyncio
+
+        p = _make_profile(api, {"name": "TEST_ai_invalid_path"})
+
+        c = MongoClient('mongodb://localhost:27017')
+        db = c['test_database']
+        db.generated_plans.delete_many({"profile_id": p["id"]})
+
+        bad_plan = {
+            "name": "Push · Chest & Shoulders",
+            "duration_min": 60,
+            "exercises": [
+                {"name": "MADE_UP_EXERCISE_XYZ", "target_sets": 4,
+                 "target_reps": "8", "rest_seconds": 90,
+                 "starter_weight": 40.0},
+            ],
+        }
+
+        async def fake_generate(profile, day_offset, recent_logs):
+            return {"plan": bad_plan, "prompt": "P", "raw_response": "R"}
+
+        monkeypatch.setattr(srv, "_generate_workout_for", fake_generate)
+
+        profile_doc = db.profiles.find_one({"id": p["id"]}, {"_id": 0})
+        profile = srv.Profile(**profile_doc)
+
+        result = asyncio.get_event_loop().run_until_complete(
+            srv._get_or_generate_plan(profile, day_offset=0)
+        )
+
+        # Client-visible plan is NOT the bad plan (it's the template fallback).
+        for ex in result["exercises"]:
+            assert ex["name"] != "MADE_UP_EXERCISE_XYZ"
+
+        # Audit says fallback and records the failure reason.
+        docs = list(db.generated_plans.find(
+            {"profile_id": p["id"], "day_offset": 0}, {"_id": 0}
+        ))
+        assert len(docs) == 1
+        assert docs[0]["fallback_used"] is True
+        assert docs[0]["validation_error"] == "validation_failed"

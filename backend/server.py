@@ -629,6 +629,7 @@ async def _get_or_generate_plan(profile: Profile, day_offset: int = 0) -> dict:
     allowed_names: set = {
         ex["name"] for exs in grouped.values() for ex in exs
     }
+    allowed_categories: set = set(grouped.keys())
 
     prompt_used = ""
     raw_resp = ""
