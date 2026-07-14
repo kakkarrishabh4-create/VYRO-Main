@@ -1,71 +1,77 @@
 # VYRO — Product Requirements Document
 
 ## Overview
-VYRO is a mobile app for a transformation coach's clients to track workouts and nutrition. Personal, disciplined, human — the mobile equivalent of a well-kept training journal.
+VYRO is a mobile app for a transformation coach's clients to track workouts and nutrition. Personal, disciplined, human — a training journal, not a control-panel dashboard.
 
 ## Delivered Milestones
 
 ### 1. Design System Foundation
-Colors (Ink / Bone / Moss / Brass / Slate), three-family typography (Fraunces / Inter / IBM Plex Mono), 8pt spacing, 8px radius, hairline-only elevation, signature `<Thread>` line, Feather line-icon lock. Source: `/app/design_guidelines.json` + `/app/frontend/src/theme/`.
+Colors (Ink / Bone / Moss / Brass / Slate), three-family typography (Fraunces / Inter / IBM Plex Mono), 8pt spacing, 8px radius, hairline-only elevation, signature `<Thread>` line, Feather line-icon lock.
 
-### 2. Onboarding Flow (5 steps)
-Wizard collects basic info → goal → lifestyle → training background, then computes daily calorie & macro targets via Mifflin-St Jeor, POSTs to `/api/profiles`, and stores the profile id in AsyncStorage under `vyro.profile.id`.
+### 2. Onboarding (5 steps)
+Basic info → goal → lifestyle → training background → target-summary. Mifflin-St Jeor macro derivation. Stores `vyro.profile.id` in AsyncStorage.
 
-### 3. Client Home Screen
-Route `/home`. Journal layout: greeting + date, conditional Brass streak badge (≥3), today's workout hero with Moss "Start workout", compact horizontal nutrition bar, and last-5-days `<Thread>`.
+### 3. Home Screen
+Route `/home`. Greeting + conditional Brass streak, today's workout hero, compact nutrition bar, last-5-days `<Thread>`. NutritionBar now tappable → `/nutrition`.
 
-### 4. Workout Detail + Inline Logging + Summary (this iteration)
+### 4. Workout Detail + Inline Logging + Summary
+Route `/workout/today` and `/workout/summary`. Inline SetRow expansion, subtle Moss check, auto rest-timer with Skip/+15s, end summary with Moss/Slate deltas (never red/green).
 
-**Route `/workout/today`**
-- Header: `Today's session` label + workout name in Fraunces + exercises count + duration.
-- **Exercise list** — ordered as they'll be performed. Each row:
-  - Exercise name (Fraunces h3)
-  - `<target_sets> × <target_reps>` (Plex Mono)
-  - `Last time · <mono numbers>` directly beneath (from most recent same-name log; `—` if none)
-- **Inline expansion** — tap an exercise header → `LayoutAnimation.easeInEaseOut` reveals the `SetRow` list (NOT a route change).
-- **SetRow** — one per set. Contains `Weight (kg|lb)` NumberStepper (step 2.5 kg / 5 lb), `Reps` NumberStepper, RPE 1–10 dot selector (optional, tap same value to clear), and a subtle Moss check button. **Completing a set changes ONLY the check button's fill/border** — the rest of the row does not shift color, per brief.
-- **Add set** secondary button appends a new set (weight/reps prefilled from last set).
-- **Rest timer** — mounts as a bottom overlay the moment a set is checked; mono `M:SS` countdown starting from that exercise's `rest_seconds` (e.g. 2:30 for bench). `+15s` extends, `Skip` dismisses. Un-completing does NOT re-trigger.
-- **Totals band + Finish** — live "Sets completed" and "Volume" in Plex Mono; `Finish workout` disabled while 0 sets are completed.
+### 5. Nutrition Tracking + Add Food Flow (this iteration)
 
-**Route `/workout/summary`**
-- Reads from AsyncStorage `vyro.workout.lastSummary`.
-- Fraunces workout name + `SESSION LOGGED` label + Moss check icon in the corner.
-- `TOTAL VOLUME` — Plex Mono large number + weight unit + comparison delta.
-- `SETS COMPLETED` — same treatment.
-- **Delta indicators** — arrow-up **Moss** for improvement, arrow-down **Slate** for regression, minus **Slate** for flat, `First time` label when no prior data. **Never red/green** — the palette stays consistent.
-- Breakdown per exercise: name + `<n> sets` + volume.
-- `Back to today` returns to `/home`.
+**Route `/nutrition`**
+- Top: `NutritionBar` — calories consumed vs target + thin Moss macro tracks (protein / carbs / fat), all numbers Plex Mono, remaining kcal on the right.
+- Below: four ordered `MealSection`s — Breakfast, Lunch, Dinner, Snacks.
+- Each section: label + subtotal kcal → `<Thread>` of `ThreadEntry`s (or a quiet `—` when empty) → inline "+ Add" (Moss tertiary) → tap surfaces `/nutrition/add?meal_type=<type>`.
+- Every entry: food name (Inter medium) + `[servings ×] portion` (Slate caption) + calories (Plex Mono).
+- Refreshes on focus (returning from the Add flow).
+
+**Route `/nutrition/add?meal_type=…`**
+- Sticky top: back arrow + `Add food` title + `SearchField` (auto-focus, `x` clear, search icon).
+- `Recent & favorites` section (`recent-section`) surfaces the user's recent foods when the query is empty — repeat logging becomes two taps.
+- Below: results list (`All foods` when empty, `Matches` when searching, `results-empty` message otherwise). Debounced 220ms.
+- `FoodRow` — name + portion + calories per serving, whole row tappable.
+- Tap opens `QuantitySheet` (native Modal, slides from bottom):
+  - servings `NumberStepper` (step 0.5, min 0.25, max 20)
+  - live macro preview — `kcal | P g | C g | F g` — recomputes on every tap
+  - meal-type pill row (Breakfast / Lunch / Dinner / Snack) with URL param pre-selected, else time-of-day default
+  - `Add to log` primary → `POST /meals` → back to `/nutrition` (or replace fallback)
 
 ### Backend (this iteration)
-- `GET /api/profiles/{id}/workouts/today` → `WorkoutDetail{workout_name, weight_unit, duration_min, exercises[{id, name, target_sets, target_reps, rest_seconds, starter_weight, last_log?}]}`. Uses `WORKOUT_EXERCISES` template map keyed by workout name; last-log context comes from the most recent same-name `logged_workouts` doc.
-- `POST /api/profiles/{id}/workouts/complete` → persists `LoggedWorkout`, upserts today's `sessions` row to `workout`, and returns `WorkoutCompleteResponse` with total volume, sets completed, per-exercise breakdown, and comparison deltas (`volume_delta_pct`, `sets_delta`) against the previous same-name workout.
-- Profile creation now also seeds one prior logged workout per unique workout name in the recent session history — so the "Last time" line has real numbers from day one.
-- **Bug regression covered**: target-rep parsing takes only the first digit run so `"6-8"` → 6 (never 68).
+- **`FOOD_CATALOG`** — 70 hand-curated items with per-portion macros.
+- **`logged_meals`** collection + `MealEntry` model.
+- `GET /api/foods?q=&limit=` — score-based search (exact > prefix > word > substring).
+- `GET /api/profiles/{id}/foods/recent?limit=` — aggregated by `food_id`, sorted by most recent, `log_count` acts as a favorite proxy.
+- `POST /api/profiles/{id}/meals` — validates `servings ∈ (0, 20]`, 404 on bad food/profile, computes and stores calories/protein/carbs/fat.
+- `DELETE /api/profiles/{id}/meals/{meal_id}` — 200 + `{ok, id}`, 404 on miss.
+- `GET /api/profiles/{id}/nutrition/today` — real daily summary from logged meals + `MealGroup[]` in fixed breakfast/lunch/dinner/snack order (empty groups included).
+- **Home parity**: `/api/profiles/{id}/today` now also derives `today_nutrition` from real logged meals (random mock removed).
+- **Seed on profile create**: adds a handful of breakfast entries + occasional snack for the current day so first launch has real numbers on home + nutrition.
+- All responses project out `_id`.
 
-### Verified (Iteration 4)
-- 11/11 pytest suite `/app/backend/tests/test_vyro_workout.py`
-- Full Playwright flow: expand → set values → check → rest timer with skip/+15s → un-check does NOT re-trigger → finish → summary with slate down-arrow (91.6% regression vs seeded) → back to home
-- No `_id` leakage; no red/green anywhere in the summary flow
+### Verified (Iteration 5)
+- 19/19 backend pytest in `/app/backend/tests/test_nutrition_flow.py` (search, recents, POST/DELETE meals, servings math, nutrition/today grouping, home parity, seed correctness, no `_id` leaks).
+- Full Playwright walk: home → nutrition → tap Lunch Add → search "chick" → tap `Chicken breast, grilled` → 1.5 servings previews **248 kcal** → confirm → back to `/nutrition` shows the new entry under Lunch, totals update accordingly.
+- Bug found + fixed inline: missing `Pressable` import in `home.tsx` after the nutrition tap-area addition.
 
-## New Primitives Added This Iteration
+## Primitives Added This Iteration
 `/app/frontend/src/components/`
-- `NumberStepper` — large tappable +/− with mono readout
-- `RPESelector` — 10-dot row, color-only selection
-- `RestTimer` — bottom overlay countdown with +15s / Skip
-- `SetRow` — set state row (weight + reps + RPE + subtle check)
-- `ExerciseRow` — collapsed context + inline expansion
+- `MealSection` — meal-type block with `<Thread>` + inline Add
+- `FoodRow` — name/portion/kcal, one-tap
+- `SearchField` — 44pt sticky, `x` clear
+- `QuantitySheet` — bottom-sheet Modal with servings stepper + live preview + meal-type pills
 
 ## Files
 ```
-/app/backend/server.py                          ← /workouts/today, /workouts/complete, seed prior log
-/app/frontend/app/workout/today.tsx             ← detail + inline logging + rest timer
-/app/frontend/app/workout/summary.tsx           ← end-of-workout summary with Moss/Slate deltas
-/app/frontend/src/components/{NumberStepper,RPESelector,RestTimer,SetRow,ExerciseRow}.tsx
+/app/backend/server.py                           ← foods, meals, nutrition/today, seed
+/app/frontend/app/nutrition/index.tsx            ← main nutrition screen
+/app/frontend/app/nutrition/add.tsx              ← Add food flow
+/app/frontend/app/home.tsx                       ← NutritionBar now tappable, focus-refresh
+/app/frontend/src/components/{MealSection,FoodRow,SearchField,QuantitySheet}.tsx
 ```
 
 ## Next Steps
-- Meal-logging bottom sheet flowing into `NutritionBar`
-- History timeline (full page — `<Thread>` beyond 5 days)
+- Full history timeline page (Thread beyond 5 days), tap an entry → see that session
 - Coach chat inbox
-- Weekly / monthly reflection summaries
+- Weekly / monthly reflection summary
+- Barcode / photo food logging (would replace the search-only path)
