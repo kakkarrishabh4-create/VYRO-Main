@@ -1,0 +1,92 @@
+{
+  "app_name": "VYRO",
+  "app_type": "fitness_coaching_app",
+  "design_philosophy": "Personal, disciplined, human. A quiet journal for transformation coaching clients — not a loud gym app. Continuous journal entries connected by a thin thread of consistency, not floating card grids.",
+  "aesthetic_keywords": ["editorial", "journal", "quiet", "disciplined", "warm-dark", "hand-kept-log"],
+  "color_tokens": {
+    "ink":   { "hex": "#17191B", "role": "primary dark background, primary text on light" },
+    "bone":  { "hex": "#F6F4EF", "role": "light card/surface, primary text on dark" },
+    "moss":  { "hex": "#3E5C46", "role": "primary buttons, active/selected states, links" },
+    "brass": { "hex": "#B98B3E", "role": "SPARINGLY — streaks, PRs, milestones, celebration only" },
+    "slate": { "hex": "#6B7280", "role": "secondary text, muted labels, disabled" },
+    "ink_soft":  { "hex": "#22252A", "role": "elevated surface on Ink background" },
+    "bone_soft": { "hex": "#ECE8DF", "role": "hairline borders on Bone" },
+    "hairline_dark":  { "hex": "#2A2D31", "role": "1px borders on Ink surfaces" },
+    "hairline_light": { "hex": "#E4DFD3", "role": "1px borders on Bone surfaces" },
+    "moss_muted": { "hex": "#2E4535", "role": "pressed state of Moss buttons" }
+  },
+  "typography": {
+    "families": {
+      "heading": "Fraunces",
+      "body":    "Inter",
+      "numeric": "IBMPlexMono"
+    },
+    "usage_rules": [
+      "Fraunces ONLY for headings — large, warm, characterful. Never for body or UI labels.",
+      "Inter for ALL body text, buttons, UI labels, form fields.",
+      "IBM Plex Mono for ALL numeric data — weights, reps, calories, macros, durations, dates. Fixed-width column alignment is the point."
+    ],
+    "scale": {
+      "display": { "family": "Fraunces", "weight": "600", "size": 40, "lineHeight": 46, "letterSpacing": -0.5 },
+      "h1":      { "family": "Fraunces", "weight": "600", "size": 32, "lineHeight": 38, "letterSpacing": -0.4 },
+      "h2":      { "family": "Fraunces", "weight": "600", "size": 24, "lineHeight": 30, "letterSpacing": -0.2 },
+      "h3":      { "family": "Fraunces", "weight": "500", "size": 20, "lineHeight": 26, "letterSpacing": 0 },
+      "body":    { "family": "Inter", "weight": "400", "size": 16, "lineHeight": 24, "letterSpacing": 0 },
+      "body_medium": { "family": "Inter", "weight": "500", "size": 16, "lineHeight": 24 },
+      "label":   { "family": "Inter", "weight": "500", "size": 13, "lineHeight": 18, "letterSpacing": 0.4, "textTransform": "uppercase" },
+      "caption": { "family": "Inter", "weight": "400", "size": 12, "lineHeight": 16 },
+      "numeric_xl": { "family": "IBMPlexMono", "weight": "500", "size": 40, "lineHeight": 44 },
+      "numeric_lg": { "family": "IBMPlexMono", "weight": "500", "size": 24, "lineHeight": 28 },
+      "numeric_md": { "family": "IBMPlexMono", "weight": "400", "size": 16, "lineHeight": 20 },
+      "numeric_sm": { "family": "IBMPlexMono", "weight": "400", "size": 13, "lineHeight": 16 }
+    }
+  },
+  "spacing": { "xs": 4, "sm": 8, "md": 16, "lg": 24, "xl": 32, "xxl": 48 },
+  "radius_tokens": { "sm": 4, "md": 8, "lg": 12, "pill": 999, "component_default": 8 },
+  "border": {
+    "hairline_width": 1,
+    "no_shadows": true,
+    "note": "The ONLY elevation on cards is a 1px hairline border. No drop shadows anywhere."
+  },
+  "signature_elements": {
+    "thread": {
+      "description": "A thin vertical line (1px, Moss at 30% opacity on Ink / Slate at 40% on Bone) that visually connects consecutive logged sessions on any history/timeline view. Represents consistency over time. Always sits to the left of each journal entry at ~24px inset, with a 6px dot marker where each entry begins.",
+      "width": 1,
+      "left_inset": 24,
+      "dot_size": 6,
+      "color_on_dark": "rgba(62,92,70,0.5)",
+      "color_on_light": "rgba(107,114,128,0.4)"
+    }
+  },
+  "buttons": {
+    "primary":   { "fill": "moss",   "text": "bone", "border": "none",   "radius": 8, "height": 52, "font": "Inter-SemiBold", "size": 16 },
+    "secondary": { "fill": "transparent", "text": "current", "border": "hairline", "radius": 8, "height": 52, "font": "Inter-Medium", "size": 16 },
+    "tertiary":  { "fill": "transparent", "text": "moss", "border": "none", "radius": 8, "height": 44, "font": "Inter-Medium", "size": 15 },
+    "no_pills": true,
+    "note": "Radius stays at 8px — never fully rounded/pill-shaped."
+  },
+  "icons": {
+    "library": "@expo/vector-icons Feather (line-only)",
+    "stroke_width": 1.5,
+    "size_default": 20,
+    "forbidden": ["stock flat-design clipart", "emoji", "colored/gradient icons", "filled-glyph icons"],
+    "rule": "Simple, consistent line-icons throughout. No mixing icon families."
+  },
+  "layout_rules": [
+    "Mobile-first, generous whitespace, left-aligned reading flow.",
+    "NO heavy card-grid dashboard look. Logged items are journal entries in a continuous vertical flow.",
+    "Screen horizontal padding: 24px (lg).",
+    "Between journal entries: 24px vertical rhythm, connected by the thread.",
+    "Section labels: uppercase Inter 13px letter-spaced, Slate color."
+  ],
+  "forbidden": [
+    "Gradients (any direction, any purpose)",
+    "Drop shadows (elevation is a 1px hairline only)",
+    "Stock/generic flat-design clipart icons",
+    "Pill-shaped buttons (radius stays at 8px)",
+    "Card-grid dashboards",
+    "Purple/indigo AI-slop palettes",
+    "Mixing icon families"
+  ],
+  "notes_for_agent": "This is a THEME FOUNDATION task — do not build any screens. Only produce the design_guidelines.json, theme module, and reusable primitives (Button, Card, Thread, Heading, BodyText, Numeric, LineIcon)."
+}
