@@ -91,14 +91,43 @@ class TestWorkoutTodayEndpoint:
                     assert isinstance(s["reps"], int)
 
     def test_workout_today_has_last_log_for_first_exercises(self, api, profile):
-        """Freshly created profile is seeded with prior logged workouts."""
+        """
+        For any exercise in the plan that the profile has actually done
+        before (present in seeded logged_workouts), last_log must be
+        populated. Robust to AI-plan variability: if the AI happens to pick
+        a plan with zero overlap with the seed, we skip — that scenario
+        doesn't disprove the feature, and the shape assertions in
+        test_workout_today_exercise_fields already cover the null-branch.
+        """
+        import pytest
+        from pymongo import MongoClient
+        c = MongoClient('mongodb://localhost:27017')
+        db = c['test_database']
+        seed_docs = list(db.logged_workouts.find(
+            {"profile_id": profile["id"]}, {"_id": 0}
+        ))
+        seeded_names = {ex["name"] for lw in seed_docs for ex in lw["exercises"]}
+        assert seeded_names, "seed should have populated some logged workouts"
+
         r = api.get(f"{BASE_URL}/api/profiles/{profile['id']}/workouts/today")
         j = r.json()
-        with_last = sum(1 for ex in j["exercises"] if ex.get("last_log"))
-        assert with_last >= 1, (
-            f"expected at least one exercise with last_log seeded, got 0. "
-            f"workout_name={j['workout_name']}"
-        )
+        overlap = seeded_names & {ex["name"] for ex in j["exercises"]}
+        if not overlap:
+            pytest.skip("AI plan happened to pick zero overlap with seed history")
+
+        # Every overlapping exercise MUST resolve to a real last_log via the
+        # per-exercise lookup in get_workout_today.
+        proven = False
+        for ex in j["exercises"]:
+            if ex["name"] in overlap:
+                assert ex.get("last_log") is not None, (
+                    f"exercise '{ex['name']}' is in seeded history but the endpoint "
+                    f"returned last_log=None — per-exercise lookup regressed."
+                )
+                sets = ex["last_log"]["sets"]
+                assert isinstance(sets, list) and len(sets) > 0
+                proven = True
+        assert proven
 
     def test_seeded_reps_not_parsed_string_join(self, api):
         """Regression: '6-8' target reps must NOT become 68 in seeded last_log."""
@@ -145,19 +174,40 @@ class TestWorkoutComplete:
         return r.json()
 
     def test_complete_success_with_previous_deltas(self, api, profile):
-        detail = self._get_today(api, profile["id"])
+        # The prior iteration of this test asked the /workouts/today endpoint
+        # for a plan and then posted that plan back as a completion. That
+        # worked when the plan came from the deterministic template picker,
+        # because seed history used the same picker so names always matched.
+        # With the AI path now active, the plan's workout_name is dynamic —
+        # so we drive this test directly off a seeded prior workout instead
+        # of the today endpoint, guaranteeing the previous_* fields resolve.
+        from pymongo import MongoClient
+        c = MongoClient('mongodb://localhost:27017')
+        db = c['test_database']
+        seeded = db.logged_workouts.find_one(
+            {"profile_id": profile["id"]}, {"_id": 0},
+            sort=[("created_at", -1)],
+        )
+        assert seeded is not None, "profile should have seeded prior workouts"
+        workout_name = seeded["workout_name"]
+        weight_unit = seeded["weight_unit"]
+        # Use two of the seeded workout's exercises so the completion is
+        # a plausible "next session of the same workout".
+        seed_exs = seeded["exercises"][:2]
+        assert len(seed_exs) >= 2, "seed should have at least 2 exercises"
+
         payload = {
-            "workout_name": detail["workout_name"],
-            "weight_unit": detail["weight_unit"],
-            "duration_min": detail["duration_min"],
+            "workout_name": workout_name,
+            "weight_unit": weight_unit,
+            "duration_min": 45,
             "exercises": [
                 {
-                    "name": ex["name"],
+                    "name": se["name"],
                     "sets": [
-                        {"weight": ex["starter_weight"], "reps": 8, "rpe": 7}
+                        {"weight": se["sets"][0]["weight"], "reps": 8, "rpe": 7}
                     ],
                 }
-                for ex in detail["exercises"][:2]
+                for se in seed_exs
             ],
         }
         r = api.post(f"{BASE_URL}/api/profiles/{profile['id']}/workouts/complete", json=payload)
@@ -170,14 +220,13 @@ class TestWorkoutComplete:
                   "volume_delta_pct", "sets_delta"):
             assert k in j, f"missing {k}"
         assert j["sets_completed"] == 2
-        # total_volume is sum of weight*reps
-        expected = sum(ex["starter_weight"] * 8 for ex in detail["exercises"][:2])
+        expected = sum(se["sets"][0]["weight"] * 8 for se in seed_exs)
         assert abs(j["total_volume"] - expected) < 0.5
         assert isinstance(j["exercises"], list) and len(j["exercises"]) == 2
         for exs in j["exercises"]:
             for k in ("name", "sets_completed", "volume"):
                 assert k in exs
-        # Since profile was seeded with prior logged workouts, previous_* should be populated
+        # Seeded prior workout with matching name → previous_* populated.
         assert j["previous_total_volume"] is not None
         assert j["previous_sets_completed"] is not None
         assert j["sets_delta"] is not None
