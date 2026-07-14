@@ -6,71 +6,74 @@ VYRO is a mobile app for a transformation coach's clients to track workouts and 
 ## Delivered Milestones
 
 ### 1. Design System Foundation
-Full visual foundation — colors, three-family typography (Fraunces / Inter / IBM Plex Mono), 8pt spacing, 8px radius, hairline-only elevation, signature `<Thread>` line, Feather line-icon lock. See `/app/design_guidelines.json` and `/app/frontend/src/theme/`.
+Colors, three-family typography (Fraunces / Inter / IBM Plex Mono), 8pt spacing, 8px radius, hairline-only elevation, `<Thread>` signature line, Feather line-icon lock. Source of truth: `/app/design_guidelines.json` + `/app/frontend/src/theme/`.
 
 ### 2. Onboarding Flow (5 steps)
-Multi-screen wizard that intakes new-client data and derives daily calorie + macro targets client-side, then persists to backend.
+Multi-step wizard collecting basic info / goal / lifestyle / training background, then computing daily calorie & macro targets via Mifflin-St Jeor. Persists to backend and stores profile id in AsyncStorage under `vyro.profile.id`.
 
-**Routes**
-- `/` — Welcome ("Start my onboarding" → `/onboarding`)
-- `/onboarding` → redirects to `/onboarding/step-1`
-- `/onboarding/step-1` — Name, age, sex, height, weight + kg/lb toggle
-- `/onboarding/step-2` — Goal single-select cards (Fat Loss / Muscle Gain / Recomp / General / Endurance)
-- `/onboarding/step-3` — Job activity, sleep stepper, stress, training-days stepper
-- `/onboarding/step-4` — Experience, injuries (multiline), equipment access
-- `/onboarding/step-5` — Calorie + macro targets summary + confirm
-- `/home` — Post-onboarding landing (temporary)
+### 3. Client Home Screen (this iteration)
+Route: `/home?profileId=<id>` (also resolves via AsyncStorage on cold start). Journal layout, top to bottom:
 
-**Shared state** via `OnboardingProvider` React Context.
-**Progress indicator** — 5 thin dashes at the top of every step, Moss for completed / current.
-**Persistent Back** — `<StepHeader>` on steps 2–5 (step 1 has no back — it's the first).
-**Continue buttons** — always disabled until required fields are filled/selected.
+1. **Greeting** — `Weekday, Month D` label in Slate + `Morning, <first-name>.` in Fraunces
+2. **Streak badge** — Brass, `<Zap>` icon + `Nd day streak`, rendered ONLY when streak ≥ 3
+3. **Today's workout hero** — `TODAY'S SESSION` label + workout name (Fraunces h1) + `<n> exercises · <m> min` meta + full-width Moss "Start workout" button
+4. **Compact nutrition bar** — `TODAY'S FUEL` + `consumed / target kcal` (IBM Plex Mono) + remaining + main Moss track + 3 slim macro tracks (protein / carbs / fat) with mono numbers
+5. **Last-5-days thread** — `LAST 5 DAYS` label + `<Thread>` with 5 `<ThreadEntry>` rows: day label + date + workout name / "Rest day" / "Missed" + check / moon / x icon in the corresponding tone
 
-**Calorie & macro derivation**
-- BMR: Mifflin-St Jeor
-- TDEE multiplier: 1.2 (desk) / 1.4 (active) / 1.55 (manual) + 0.03 × training days
-- Goal calorie adjustments: fat-loss −20%, muscle +10%, recomp −5%, general 0%, endurance +5%
-- Macro splits (P/C/F % of kcal): fat_loss 40/30/30, muscle 30/45/25, recomp 35/40/25, general 25/50/25, endurance 20/60/20
+**Additional plumbing**
+- `/` (welcome) — auto-redirects to `/home` if a profile id is in storage; otherwise shows onboarding CTA
+- `/workout/today` — placeholder detail page reached from the Start button; will host set-by-set logging next
+- Pull-to-refresh on home, plus explicit empty (`home-empty`) and error (`home-error`) states with retry
 
-**Backend**
-- `POST /api/profiles` — validates payload (age 13–100, height 80–260 cm, weight > 20, enum sex/goal/etc.), stores in MongoDB `profiles` collection, returns full profile with UUID `id`. `_id` is stripped from all responses via projection.
-- `GET /api/profiles/{id}` — 404 if not found, otherwise returns the profile.
-- `GET /api/profiles` — list, newest first.
+### Backend
+- `POST /api/profiles` — validates, stores profile, **seeds 5 recent days** of `sessions` (workout / rest / missed distribution derived from `training_days`, deterministic per profile id)
+- `GET /api/profiles/{id}` — profile fetch
+- `GET /api/profiles/{id}/today` — returns:
+  ```
+  {profile_id, name, today_date,
+   today_workout {name, exercises, duration_min},
+   today_nutrition {calories_consumed/target, protein_consumed/target,
+                    carbs_consumed/target, fat_consumed/target},
+   streak, history[]}
+  ```
+- Today's workout picked deterministically from a per-goal template pool
+- Nutrition consumed: seeded partial day (30–65% of target) until meal logging lands
+- Streak logic: `workout` + `rest` count as active; `missed` breaks the streak
+- All Mongo responses project out `_id`
 
-**Manually verified end-to-end (Playwright)**
-- Full flow: fill step 1 → step 5 → confirm → land on `/home` with "Welcome, Alex." greeting
-- Progress dashes light correctly per step
-- Back button (`step-back-button`) exists on step 2+
-- Invalid backend payload (age = 12) → HTTP 422
-- Response contains `id` and no `_id`
-
-## Reusable Primitives (added this iteration)
+## Reusable Primitives Added This Iteration
 `/app/frontend/src/components/`
-- `ProgressIndicator` — n-of-total top dash row
-- `OptionCard` — large tappable select tile
-- `TextField` — Inter/mono input with hairline border + focus-Moss + suffix
-- `UnitToggle<T>` — 2-value segmented control (used for kg/lb)
-- `Stepper` — minus/plus numeric with mono readout
-- `StepHeader` — persistent back + Fraunces headline + Inter subhead
+- `WorkoutHero` — journal-feel hero (no card border)
+- `NutritionBar` — compact calorie row + 3 slim macro tracks
+- `StreakBadge` — Brass, self-hiding under threshold
+- `HistoryThread` — the Thread applied to N days of activity with day/date/status rows
+
+## Verified (Iteration 3)
+- 10/10 pytest backend suite in `/app/backend/tests/test_vyro_today.py`
+- Frontend Playwright walk-through of home + workout + empty + error states
+- StreakBadge threshold behavior confirmed
+- No `_id` leakage anywhere
 
 ## Files
 ```
-/app/backend/server.py                        ← POST/GET /api/profiles
-/app/frontend/app/index.tsx                   ← welcome
-/app/frontend/app/home.tsx                    ← post-onboarding landing
-/app/frontend/app/onboarding/
-  ├── _layout.tsx                              ← <OnboardingProvider> + Stack
-  ├── index.tsx                                ← Redirect → step-1
-  └── step-1.tsx … step-5.tsx
-/app/frontend/src/context/OnboardingContext.tsx  ← state + Mifflin/TDEE/macros
-/app/frontend/src/components/                    ← primitives (see above)
-/app/frontend/src/theme/                         ← tokens
+/app/backend/server.py                         ← + /today endpoint, session seeding
+/app/frontend/app/index.tsx                    ← auto-redirect welcome
+/app/frontend/app/home.tsx                     ← client home (this iteration)
+/app/frontend/app/workout/today.tsx            ← placeholder detail
+/app/frontend/app/onboarding/…                 ← unchanged from iteration 2
+/app/frontend/src/components/
+  ├─ WorkoutHero.tsx
+  ├─ NutritionBar.tsx
+  ├─ StreakBadge.tsx
+  ├─ HistoryThread.tsx
+  └─ …previous primitives
+/app/frontend/src/context/OnboardingContext.tsx
+/app/frontend/src/theme/                        ← tokens
 ```
 
 ## Next Steps
-- Home dashboard (real): today's session card, week ring, streak, next meal
-- Log workout screen (uses `<Thread>`)
-- Log meal screen (uses `<Thread>`)
-- History timeline (the natural home for `<Thread>`)
-- Coach chat
-- Profile persistence beyond a single session (auth or device-local session)
+- Real meal-log screen (bottom sheet, mono macro totals rolling up into `NutritionBar`)
+- Set-by-set workout logger replacing `/workout/today` placeholder
+- History timeline (full page, using `<Thread>` beyond 5 days)
+- Coach chat inbox
+- Weekly / monthly reflection summaries

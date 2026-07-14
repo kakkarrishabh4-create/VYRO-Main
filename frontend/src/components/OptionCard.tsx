@@ -11,7 +11,8 @@ import { Pressable, StyleSheet, View, ViewStyle } from 'react-native';
 
 import { colors, radius, spacing } from '../theme';
 
-import { BodyText, LineIcon } from './index';
+import { LineIcon } from './LineIcon';
+import { BodyText } from './Typography';
 
 export interface OptionCardProps {
   title: string;
