@@ -1,77 +1,76 @@
 # VYRO — Product Requirements Document
 
 ## Overview
-VYRO is a mobile app for a transformation coach's clients to track workouts and nutrition. It is deliberately anti-generic-gym-app: personal, disciplined, human — the mobile equivalent of a well-kept training journal.
+VYRO is a mobile app for a transformation coach's clients to track workouts and nutrition. Personal, disciplined, human — the mobile equivalent of a well-kept training journal.
 
-## Current Milestone: Design System Foundation
-This iteration establishes the visual foundation only. **No screens have been built.** All future screens must consume the tokens and primitives defined below so the app stays consistent by construction, not by convention.
+## Delivered Milestones
 
-## Design Tokens (source of truth)
-`/app/design_guidelines.json` — machine-readable specification. Human-readable summary:
+### 1. Design System Foundation
+Full visual foundation — colors, three-family typography (Fraunces / Inter / IBM Plex Mono), 8pt spacing, 8px radius, hairline-only elevation, signature `<Thread>` line, Feather line-icon lock. See `/app/design_guidelines.json` and `/app/frontend/src/theme/`.
 
-### Colors
-| Token | Hex | Role |
-|---|---|---|
-| Ink | `#17191B` | Primary dark background |
-| Bone | `#F6F4EF` | Light surface / primary text on dark |
-| Moss | `#3E5C46` | Primary buttons, active states |
-| Brass | `#B98B3E` | **Sparingly** — streaks, PRs, milestones only |
-| Slate | `#6B7280` | Secondary text |
+### 2. Onboarding Flow (5 steps)
+Multi-screen wizard that intakes new-client data and derives daily calorie + macro targets client-side, then persists to backend.
 
-Supporting: `inkSoft`, `boneSoft`, hairline colors, muted moss pressed state.
+**Routes**
+- `/` — Welcome ("Start my onboarding" → `/onboarding`)
+- `/onboarding` → redirects to `/onboarding/step-1`
+- `/onboarding/step-1` — Name, age, sex, height, weight + kg/lb toggle
+- `/onboarding/step-2` — Goal single-select cards (Fat Loss / Muscle Gain / Recomp / General / Endurance)
+- `/onboarding/step-3` — Job activity, sleep stepper, stress, training-days stepper
+- `/onboarding/step-4` — Experience, injuries (multiline), equipment access
+- `/onboarding/step-5` — Calorie + macro targets summary + confirm
+- `/home` — Post-onboarding landing (temporary)
 
-### Typography (three families, one job each)
-- **Fraunces** — headings only (display / h1 / h2 / h3)
-- **Inter** — body, buttons, all UI labels
-- **IBM Plex Mono** — all numeric data (weights, reps, calories, macros) so columns align
+**Shared state** via `OnboardingProvider` React Context.
+**Progress indicator** — 5 thin dashes at the top of every step, Moss for completed / current.
+**Persistent Back** — `<StepHeader>` on steps 2–5 (step 1 has no back — it's the first).
+**Continue buttons** — always disabled until required fields are filled/selected.
 
-### Spacing (8pt grid)
-`xs 4 · sm 8 · md 16 · lg 24 · xl 32 · xxl 48`
+**Calorie & macro derivation**
+- BMR: Mifflin-St Jeor
+- TDEE multiplier: 1.2 (desk) / 1.4 (active) / 1.55 (manual) + 0.03 × training days
+- Goal calorie adjustments: fat-loss −20%, muscle +10%, recomp −5%, general 0%, endurance +5%
+- Macro splits (P/C/F % of kcal): fat_loss 40/30/30, muscle 30/45/25, recomp 35/40/25, general 25/50/25, endurance 20/60/20
 
-### Radius
-`sm 4 · md 8 · lg 12` — buttons/cards default to **8px, never pill**.
+**Backend**
+- `POST /api/profiles` — validates payload (age 13–100, height 80–260 cm, weight > 20, enum sex/goal/etc.), stores in MongoDB `profiles` collection, returns full profile with UUID `id`. `_id` is stripped from all responses via projection.
+- `GET /api/profiles/{id}` — 404 if not found, otherwise returns the profile.
+- `GET /api/profiles` — list, newest first.
 
-### Signature: the "Thread"
-A thin 1px vertical line (Moss at 50% alpha on Ink) inset 24px from the left, with a 6px dot at each entry. Connects consecutive journal entries on any history/timeline view.
+**Manually verified end-to-end (Playwright)**
+- Full flow: fill step 1 → step 5 → confirm → land on `/home` with "Welcome, Alex." greeting
+- Progress dashes light correctly per step
+- Back button (`step-back-button`) exists on step 2+
+- Invalid backend payload (age = 12) → HTTP 422
+- Response contains `id` and no `_id`
 
-### Forbidden (hard rules)
-- Gradients
-- Drop shadows (elevation = 1px hairline only)
-- Pill-shaped buttons
-- Card-grid dashboards
-- Stock/flat clipart icons or emoji as icons
-- Mixed icon families (locked to Feather)
+## Reusable Primitives (added this iteration)
+`/app/frontend/src/components/`
+- `ProgressIndicator` — n-of-total top dash row
+- `OptionCard` — large tappable select tile
+- `TextField` — Inter/mono input with hairline border + focus-Moss + suffix
+- `UnitToggle<T>` — 2-value segmented control (used for kg/lb)
+- `Stepper` — minus/plus numeric with mono readout
+- `StepHeader` — persistent back + Fraunces headline + Inter subhead
 
-## File Structure
+## Files
 ```
-/app/design_guidelines.json         ← tokens (JSON source of truth)
-/app/frontend/assets/fonts/         ← Fraunces, Inter, IBM Plex Mono TTFs
-/app/frontend/src/theme/
-  ├── index.ts                       ← barrel export
-  ├── colors.ts                      ← color tokens
-  ├── typography.ts                  ← type scale + font family names
-  ├── spacing.ts                     ← spacing / radius / thread constants
-  └── fonts.ts                       ← expo-font source map
-/app/frontend/src/components/
-  ├── index.ts                       ← barrel export
-  ├── Button.tsx                     ← primary (Moss) / secondary (outline)
-  ├── Card.tsx                       ← hairline surface, no shadow
-  ├── Thread.tsx                     ← Thread + ThreadEntry (signature element)
-  ├── LineIcon.tsx                   ← Feather-only wrapper
-  └── Typography.tsx                 ← Heading / BodyText / Numeric
-/app/frontend/app/_layout.tsx        ← loads fonts, sets Ink bg globally
-/app/frontend/app/index.tsx          ← theme-verification placeholder (delete before shipping)
+/app/backend/server.py                        ← POST/GET /api/profiles
+/app/frontend/app/index.tsx                   ← welcome
+/app/frontend/app/home.tsx                    ← post-onboarding landing
+/app/frontend/app/onboarding/
+  ├── _layout.tsx                              ← <OnboardingProvider> + Stack
+  ├── index.tsx                                ← Redirect → step-1
+  └── step-1.tsx … step-5.tsx
+/app/frontend/src/context/OnboardingContext.tsx  ← state + Mifflin/TDEE/macros
+/app/frontend/src/components/                    ← primitives (see above)
+/app/frontend/src/theme/                         ← tokens
 ```
 
-## Import Contract for Future Screens
-```ts
-import { colors, spacing, radius, typography } from '@/src/theme';
-import { Button, Card, Heading, BodyText, Numeric, Thread, ThreadEntry, LineIcon } from '@/src/components';
-```
-Screens must **never** hardcode hex values, font family strings, or spacing numbers. They must **never** use raw `<Text>` — always go through `Heading` / `BodyText` / `Numeric`.
-
-## Backend
-Untouched this iteration — default `/api/status` scaffold only.
-
-## Next Steps (not built)
-Screens will be layered on this foundation in subsequent iterations: onboarding, today's session, log workout, log meal, history timeline (which will use `<Thread>`), progress, coach chat.
+## Next Steps
+- Home dashboard (real): today's session card, week ring, streak, next meal
+- Log workout screen (uses `<Thread>`)
+- Log meal screen (uses `<Thread>`)
+- History timeline (the natural home for `<Thread>`)
+- Coach chat
+- Profile persistence beyond a single session (auth or device-local session)
