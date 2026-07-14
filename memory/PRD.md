@@ -4,74 +4,48 @@
 VYRO is a mobile app for a transformation coach's clients to track workouts and nutrition. Personal, disciplined, human — a training journal, not a control-panel dashboard.
 
 ## Delivered Milestones
+1. **Design system foundation** — colors / three-family typography / hairline-only elevation / signature `<Thread>`.
+2. **Onboarding (5 steps)** — Mifflin-St Jeor macro derivation, stored profile id.
+3. **Home screen** — greeting, conditional Brass streak, workout hero, nutrition bar, last-5-days Thread.
+4. **Workout detail + inline logging + summary** — expandable SetRows, auto rest timer, Moss/Slate deltas.
+5. **Nutrition tracking + add-food flow** — daily summary bar, 4 meal sections with `<Thread>`, sticky search + recents + quantity sheet.
+6. **AI-generated workout plans (this iteration — backend only)** — `_pick_workout_for` replaced by a validated LLM path with a robust fallback.
 
-### 1. Design System Foundation
-Colors (Ink / Bone / Moss / Brass / Slate), three-family typography (Fraunces / Inter / IBM Plex Mono), 8pt spacing, 8px radius, hairline-only elevation, signature `<Thread>` line, Feather line-icon lock.
+## AI Workout Generation (Iteration 6)
 
-### 2. Onboarding (5 steps)
-Basic info → goal → lifestyle → training background → target-summary. Mifflin-St Jeor macro derivation. Stores `vyro.profile.id` in AsyncStorage.
+### Behavior
+- `GET /profiles/{id}/today` and `GET /profiles/{id}/workouts/today` now serve **AI-generated plans**, cached per `(profile_id, day_offset, date)` so both endpoints share **one LLM call per day**.
+- **Model**: OpenAI `gpt-5.4` via `emergentintegrations.llm.chat.LlmChat` (non-streaming `send_message` — we need the complete JSON before validation).
+- **Progressive overload**: the last 2–3 `logged_workouts` are formatted into the prompt (exercise names, weights, reps, RPE) with explicit rules — overload on target-RPE≤8 completions, hold or reduce on RPE≥9 or misses.
+- **Response shape unchanged** — the frontend needed zero updates.
 
-### 3. Home Screen
-Route `/home`. Greeting + conditional Brass streak, today's workout hero, compact nutrition bar, last-5-days `<Thread>`. NutritionBar now tappable → `/nutrition`.
+### Safety layers (in order)
+1. **Pre-filter (`_pool_after_injuries`)** — 9 injury keywords → substring block list; matching exercises are stripped BEFORE the pool is shown to the model. Categories with < 3 remaining exercises are dropped entirely.
+2. **Prompt instruction** — the model is told to avoid injury-loading exercises even if they slip past filtering.
+3. **Post-validation (`_validate_generated_workout`)** — strict schema: `name` must equal one of the category names, `duration_min ∈ [10,180]`, `1 ≤ target_sets ≤ 6`, `target_reps` non-empty string, `0 ≤ rest_seconds ≤ 300`, `starter_weight ≥ 0`, every exercise name in the allowed set derived from the **filtered** pool.
+4. **Fallback** — any failure (LLM error, JSON parse error, validation fail) falls through to `_fallback_plan_for`, which uses the deterministic template picker + WORKOUT_EXERCISES + `_convert_weight` scaling. **The injury filter is applied on this path too** so a broken LLM doesn't leak blocked exercises into the client experience. Fallback swaps to an alternate template within the goal if the primary one is shredded by injuries.
+5. **Audit trail** — every attempt writes ONE `generated_plans` doc: `{id, profile_id, day_offset, date, prompt, raw_response, plan, fallback_used, validation_error?, created_at}`. Backend-only — verified not to leak via response bodies.
 
-### 4. Workout Detail + Inline Logging + Summary
-Route `/workout/today` and `/workout/summary`. Inline SetRow expansion, subtle Moss check, auto rest-timer with Skip/+15s, end summary with Moss/Slate deltas (never red/green).
+### Improved correctness (added incidentally)
+- `get_workout_today` now finds `last_log` **per exercise** across ALL prior logged workouts, not just workouts sharing the current name. Progressive-overload context is preserved when the AI mixes exercises across categories.
 
-### 5. Nutrition Tracking + Add Food Flow (this iteration)
+### Testing
+- 62/62 backend pytest across 4 suites — no regressions in prior iterations.
+- New file: `/app/backend/tests/test_ai_workout_generation.py` (22 tests) covers:
+  - `_validate_generated_workout`: 9 cases (valid plan / invented exercise / invented workout name / out-of-range sets / empty reps / bad rest / negative weight / zero exercises / missing keys)
+  - `_pool_after_injuries`: 6 cases (empty / shoulder / knee / multi-injury / case-insensitive / minimum-category-size)
+  - Endpoint integration: 7 cases (shape preserved / today ↔ workout-today agree / cache hit < 3s / audit trail written / injury blocks reach nowhere / no prompt leak)
 
-**Route `/nutrition`**
-- Top: `NutritionBar` — calories consumed vs target + thin Moss macro tracks (protein / carbs / fat), all numbers Plex Mono, remaining kcal on the right.
-- Below: four ordered `MealSection`s — Breakfast, Lunch, Dinner, Snacks.
-- Each section: label + subtotal kcal → `<Thread>` of `ThreadEntry`s (or a quiet `—` when empty) → inline "+ Add" (Moss tertiary) → tap surfaces `/nutrition/add?meal_type=<type>`.
-- Every entry: food name (Inter medium) + `[servings ×] portion` (Slate caption) + calories (Plex Mono).
-- Refreshes on focus (returning from the Add flow).
-
-**Route `/nutrition/add?meal_type=…`**
-- Sticky top: back arrow + `Add food` title + `SearchField` (auto-focus, `x` clear, search icon).
-- `Recent & favorites` section (`recent-section`) surfaces the user's recent foods when the query is empty — repeat logging becomes two taps.
-- Below: results list (`All foods` when empty, `Matches` when searching, `results-empty` message otherwise). Debounced 220ms.
-- `FoodRow` — name + portion + calories per serving, whole row tappable.
-- Tap opens `QuantitySheet` (native Modal, slides from bottom):
-  - servings `NumberStepper` (step 0.5, min 0.25, max 20)
-  - live macro preview — `kcal | P g | C g | F g` — recomputes on every tap
-  - meal-type pill row (Breakfast / Lunch / Dinner / Snack) with URL param pre-selected, else time-of-day default
-  - `Add to log` primary → `POST /meals` → back to `/nutrition` (or replace fallback)
-
-### Backend (this iteration)
-- **`FOOD_CATALOG`** — 70 hand-curated items with per-portion macros.
-- **`logged_meals`** collection + `MealEntry` model.
-- `GET /api/foods?q=&limit=` — score-based search (exact > prefix > word > substring).
-- `GET /api/profiles/{id}/foods/recent?limit=` — aggregated by `food_id`, sorted by most recent, `log_count` acts as a favorite proxy.
-- `POST /api/profiles/{id}/meals` — validates `servings ∈ (0, 20]`, 404 on bad food/profile, computes and stores calories/protein/carbs/fat.
-- `DELETE /api/profiles/{id}/meals/{meal_id}` — 200 + `{ok, id}`, 404 on miss.
-- `GET /api/profiles/{id}/nutrition/today` — real daily summary from logged meals + `MealGroup[]` in fixed breakfast/lunch/dinner/snack order (empty groups included).
-- **Home parity**: `/api/profiles/{id}/today` now also derives `today_nutrition` from real logged meals (random mock removed).
-- **Seed on profile create**: adds a handful of breakfast entries + occasional snack for the current day so first launch has real numbers on home + nutrition.
-- All responses project out `_id`.
-
-### Verified (Iteration 5)
-- 19/19 backend pytest in `/app/backend/tests/test_nutrition_flow.py` (search, recents, POST/DELETE meals, servings math, nutrition/today grouping, home parity, seed correctness, no `_id` leaks).
-- Full Playwright walk: home → nutrition → tap Lunch Add → search "chick" → tap `Chicken breast, grilled` → 1.5 servings previews **248 kcal** → confirm → back to `/nutrition` shows the new entry under Lunch, totals update accordingly.
-- Bug found + fixed inline: missing `Pressable` import in `home.tsx` after the nutrition tap-area addition.
-
-## Primitives Added This Iteration
-`/app/frontend/src/components/`
-- `MealSection` — meal-type block with `<Thread>` + inline Add
-- `FoodRow` — name/portion/kcal, one-tap
-- `SearchField` — 44pt sticky, `x` clear
-- `QuantitySheet` — bottom-sheet Modal with servings stepper + live preview + meal-type pills
-
-## Files
+### Key files
 ```
-/app/backend/server.py                           ← foods, meals, nutrition/today, seed
-/app/frontend/app/nutrition/index.tsx            ← main nutrition screen
-/app/frontend/app/nutrition/add.tsx              ← Add food flow
-/app/frontend/app/home.tsx                       ← NutritionBar now tappable, focus-refresh
-/app/frontend/src/components/{MealSection,FoodRow,SearchField,QuantitySheet}.tsx
+/app/backend/server.py                           ← _pool_after_injuries, _validate_generated_workout,
+                                                   _generate_workout_for, _fallback_plan_for,
+                                                   _get_or_generate_plan; both endpoints wired
+/app/backend/.env                                ← EMERGENT_LLM_KEY
+/app/backend/tests/test_ai_workout_generation.py ← full AI-path coverage
 ```
 
 ## Next Steps
-- Full history timeline page (Thread beyond 5 days), tap an entry → see that session
-- Coach chat inbox
+- Full history timeline page (Thread beyond 5 days)
+- Coach chat inbox (natural next use of the same LLM key)
 - Weekly / monthly reflection summary
-- Barcode / photo food logging (would replace the search-only path)

@@ -6,11 +6,14 @@ from motor.motor_asyncio import AsyncIOMotorClient
 import os
 import logging
 import random
+import json
 from pathlib import Path
 from pydantic import BaseModel, Field
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Dict
 import uuid
 from datetime import datetime, timezone, timedelta
+
+from emergentintegrations.llm.chat import LlmChat, UserMessage
 
 
 ROOT_DIR = Path(__file__).parent
@@ -270,6 +273,407 @@ def _convert_weight(kg: float, unit: WeightUnit) -> float:
     return round(kg if unit == "kg" else kg * 2.20462, 1)
 
 
+# ---------------- AI workout generation ----------------
+# Broad-strokes safety net: if a client's `injuries` string mentions any of
+# these keywords, we STRIP the matching exercise names from the pool BEFORE
+# the model sees it. This is the belt to the model instruction's suspenders —
+# even a rogue LLM response can't reintroduce a filtered movement because the
+# post-validation allowlist is derived from the same filtered universe.
+INJURY_EXCLUSIONS: Dict[str, List[str]] = {
+    "shoulder": [
+        "Overhead Press", "Dumbbell Shoulder Press", "Lateral Raise",
+        "Face Pull", "Handstand",
+    ],
+    "knee": [
+        "Back Squat", "Front Squat", "Goblet Squat", "Bulgarian Split Squat",
+        "Reverse Lunge", "Walking Lunge", "Leg Extension", "Leg Curl",
+        "Cossack Squat", "Sprint", "Threshold Intervals", "Steady Run",
+    ],
+    "back": [
+        "Deadlift", "Trap Bar Deadlift", "Romanian Deadlift",
+        "Single-leg RDL", "Barbell Row", "Bent-over",
+    ],
+    "lower back": [
+        "Deadlift", "Trap Bar Deadlift", "Romanian Deadlift",
+        "Single-leg RDL", "Barbell Row", "Bent-over", "Back Squat",
+    ],
+    "elbow": [
+        "Skullcrusher", "Triceps Rope", "Triceps Pushdown", "Biceps Curl",
+        "Barbell Curl", "Hammer Curl", "Dumbbell Curl", "Triceps Extension",
+    ],
+    "wrist": [
+        "Front Squat", "Barbell Curl", "Push-up", "Skullcrusher",
+        "Barbell Bench Press",
+    ],
+    "hip": ["Bulgarian Split Squat", "Cossack Squat", "Walking Lunge"],
+    "ankle": [
+        "Sprint", "Threshold Intervals", "Steady Run", "Standing Calf Raise",
+        "Calf Raise", "Walking Lunge",
+    ],
+    "neck": ["Overhead Press", "Dumbbell Shoulder Press", "Face Pull"],
+}
+
+
+def _pool_after_injuries(injuries: str) -> Dict[str, List[dict]]:
+    """
+    Group WORKOUT_EXERCISES by category, dropping any exercise whose name
+    matches an injury keyword substring (case-insensitive). Categories with
+    fewer than 3 remaining exercises are dropped entirely so the model never
+    tries to build a session out of a thin pool.
+    """
+    injuries_l = (injuries or "").lower()
+    blocked: set = set()
+    for keyword, names in INJURY_EXCLUSIONS.items():
+        if keyword in injuries_l:
+            for n in names:
+                blocked.add(n.lower())
+
+    grouped: Dict[str, List[dict]] = {}
+    for category, exercises in WORKOUT_EXERCISES.items():
+        allowed = [
+            ex for ex in exercises
+            if not any(b in ex["name"].lower() for b in blocked)
+        ]
+        if len(allowed) >= 3:
+            grouped[category] = allowed
+    return grouped
+
+
+def _validate_generated_workout(plan: dict, allowed_names: set,
+                                 allowed_categories: set) -> bool:
+    """
+    Strict schema + allowlist check. Runs BEFORE we save the plan or hand it
+    to the client. Any failure = fall back to the template so a broken AI
+    response can never surface.
+    """
+    if not isinstance(plan, dict):
+        return False
+    name = plan.get("name")
+    duration = plan.get("duration_min")
+    exercises = plan.get("exercises")
+    if not isinstance(name, str) or not name.strip():
+        return False
+    if name not in allowed_categories:
+        return False
+    if not isinstance(duration, int) or duration < 10 or duration > 180:
+        return False
+    if not isinstance(exercises, list) or len(exercises) == 0 or len(exercises) > 15:
+        return False
+
+    for ex in exercises:
+        if not isinstance(ex, dict):
+            return False
+        if ex.get("name") not in allowed_names:
+            return False
+        ts = ex.get("target_sets")
+        if not isinstance(ts, int) or ts < 1 or ts > 6:
+            return False
+        tr = ex.get("target_reps")
+        if not isinstance(tr, str) or not tr.strip():
+            return False
+        rs = ex.get("rest_seconds")
+        if not isinstance(rs, int) or rs < 0 or rs > 300:
+            return False
+        sw = ex.get("starter_weight")
+        if not isinstance(sw, (int, float)) or sw < 0:
+            return False
+    return True
+
+
+def _format_recent_logs(logs: List["LoggedWorkout"]) -> str:
+    """Compact, model-friendly recap of the client's last few sessions."""
+    if not logs:
+        return "(no recent logs — this is their first tracked session)"
+    lines: List[str] = []
+    for lw in logs[:3]:
+        header = f"- {lw.workout_name} ({lw.date}, {lw.weight_unit}):"
+        lines.append(header)
+        for ex in lw.exercises[:6]:
+            set_bits = []
+            for s in ex.sets:
+                bit = f"{s.weight}×{s.reps}"
+                if s.rpe:
+                    bit += f"@RPE{s.rpe}"
+                set_bits.append(bit)
+            lines.append(f"    · {ex.name}: {', '.join(set_bits)}")
+    return "\n".join(lines)
+
+
+async def _generate_workout_for(
+    profile: Profile,
+    day_offset: int,
+    recent_logs: List["LoggedWorkout"],
+) -> dict:
+    """
+    Ask the LLM for a workout tailored to profile + recent logs. Returns
+    {"plan": dict, "prompt": str, "raw_response": str}. Raises on any
+    failure (network, empty response, parse error) — the caller catches and
+    falls back to the template so failure never reaches the client.
+    """
+    grouped = _pool_after_injuries(profile.injuries or "")
+    if not grouped:
+        raise ValueError("Injury filter removed every category from the pool")
+
+    # Flat allowlist derived from the FILTERED pool. This is what validation
+    # will check against — so a filtered exercise cannot slip back in even
+    # if the model tries.
+    allowed_names: set = set()
+    pool_lines: List[str] = []
+    for cat, exs in grouped.items():
+        pool_lines.append(f"[{cat}]")
+        for ex in exs:
+            allowed_names.add(ex["name"])
+            pool_lines.append(f"  - {ex['name']}")
+    pool_text = "\n".join(pool_lines)
+
+    logs_block = _format_recent_logs(recent_logs)
+
+    injury_line = (
+        f"- Client reports: {profile.injuries}. Avoid loading or aggravating "
+        f"this area. Prefer alternatives that don't stress it (e.g. avoid "
+        f"overhead pressing for shoulder issues, avoid deep-knee loading for "
+        f"knee issues)."
+        if profile.injuries and profile.injuries.strip()
+        else "- No specific limitations reported."
+    )
+
+    system_message = (
+        "You are an experienced strength & conditioning coach programming "
+        "one training session at a time for a single client. You DO NOT "
+        "invent exercise names. You may ONLY use exercise names taken "
+        "verbatim from the ALLOWED_EXERCISES list — copy them exactly, "
+        "including punctuation and capitalization. Your ENTIRE reply is a "
+        "single JSON object matching the schema — no prose, no markdown "
+        "fences, no explanation before or after."
+    )
+
+    user_prompt = f"""CLIENT PROFILE
+- Goal: {profile.goal}
+- Experience: {profile.experience}
+- Training days per week: {profile.training_days}
+- Equipment access: {profile.equipment}
+- Job activity: {profile.job_activity}
+- Average sleep: {profile.sleep_hours} h / night
+- Stress: {profile.stress}
+- Weight unit for prescribed loads: {profile.weight_unit}
+
+INJURIES / LIMITATIONS
+{injury_line}
+
+RECENT SESSIONS (newest first — apply progressive overload from these):
+{logs_block}
+
+PROGRESSION RULES
+- For a movement they've done recently at target reps with RPE <= 8 across all sets, prescribe a small overload (weight +2.5-5% or +1 rep).
+- If any set was missed or RPE >= 9, HOLD or slightly reduce load.
+- For a movement with no recent data, prescribe a conservative starter weight the client can hit for all sets at RPE <= 7.
+- Rest between sets: heavy compound lifts 120-180s, hypertrophy 60-120s, accessories/conditioning 30-60s.
+
+ALLOWED_EXERCISES (grouped by category — copy names EXACTLY, never invent):
+{pool_text}
+
+TASK
+Design ONE workout for this client's next session (offset={day_offset} day from today). Pick a session name that fits the emphasis. The `name` you return MUST be one of the ALLOWED_CATEGORY_NAMES listed at the top of ALLOWED_EXERCISES (copied verbatim). You may pull exercises from any category, but the session's `name` itself must match one of the category labels exactly.
+
+Select 4-7 exercises, ordered primary compound -> accessories/conditioning.
+
+Return STRICT JSON only, matching this schema exactly:
+{{
+  "name": "<workout name>",
+  "duration_min": <int between 20 and 90>,
+  "exercises": [
+    {{
+      "name": "<exact name copied from ALLOWED_EXERCISES>",
+      "target_sets": <int between 1 and 6>,
+      "target_reps": "<string like '8-10' or '12' or '45s'>",
+      "rest_seconds": <int between 0 and 300>,
+      "starter_weight": <float in {profile.weight_unit}, 0 for bodyweight>
+    }}
+  ]
+}}
+
+Return ONLY the JSON object. No prose. No markdown fences. No explanation."""
+
+    api_key = os.environ.get("EMERGENT_LLM_KEY", "")
+    if not api_key:
+        raise RuntimeError("EMERGENT_LLM_KEY is not configured")
+
+    chat = LlmChat(
+        api_key=api_key,
+        session_id=f"vyro-plan-{profile.id}-{day_offset}",
+        system_message=system_message,
+    ).with_model("openai", "gpt-5.4")
+
+    raw = await chat.send_message(UserMessage(text=user_prompt))
+    # send_message may return either the text directly or an object with
+    # a .content attribute — accept both defensively.
+    if hasattr(raw, "content"):
+        response_text = str(raw.content)
+    else:
+        response_text = str(raw)
+
+    # Strip accidental markdown fences (```json ... ```)
+    cleaned = response_text.strip()
+    if cleaned.startswith("```"):
+        stripped_lines = [
+            ln for ln in cleaned.splitlines()
+            if not ln.strip().startswith("```")
+        ]
+        cleaned = "\n".join(stripped_lines).strip()
+
+    try:
+        plan = json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Model response was not valid JSON: {e}")
+
+    return {"plan": plan, "prompt": user_prompt, "raw_response": response_text}
+
+
+async def _fallback_plan_for(profile: Profile, day_offset: int) -> dict:
+    """
+    Deterministic template-based plan. Used both as the primary source for
+    seeded history (day_offset > 0) and as the emergency fallback whenever
+    AI generation fails or fails validation.
+
+    Applies the same injury pre-filter as the AI path so a shoulder-injured
+    client never sees "Overhead Press" just because the LLM was unreachable.
+    """
+    tpl = _pick_workout_for(profile, day_offset=day_offset)
+    ex_defs_raw = WORKOUT_EXERCISES.get(tpl["name"], [])
+    scale = _experience_scale(profile.experience)
+
+    # Injury pre-filter: strip any blocked exercise names, no matter what
+    # template the picker chose.
+    injuries_l = (profile.injuries or "").lower()
+    blocked_substrings: set = set()
+    for keyword, names in INJURY_EXCLUSIONS.items():
+        if keyword in injuries_l:
+            for n in names:
+                blocked_substrings.add(n.lower())
+
+    filtered = [
+        e for e in ex_defs_raw
+        if not any(b in e["name"].lower() for b in blocked_substrings)
+    ]
+
+    # If the template got shredded by injuries, borrow from a "safer" template
+    # of the same goal that survives filtering.
+    if len(filtered) < 3:
+        for alt_tpl in WORKOUT_TEMPLATES.get(profile.goal, []):
+            alt_defs = WORKOUT_EXERCISES.get(alt_tpl["name"], [])
+            alt_filtered = [
+                e for e in alt_defs
+                if not any(b in e["name"].lower() for b in blocked_substrings)
+            ]
+            if len(alt_filtered) >= 3:
+                tpl = alt_tpl
+                filtered = alt_filtered
+                break
+
+    return {
+        "name": tpl["name"],
+        "duration_min": tpl["duration_min"],
+        "exercises": [
+            {
+                "name": e["name"],
+                "target_sets": e["target_sets"],
+                "target_reps": e["target_reps"],
+                "rest_seconds": e["rest_seconds"],
+                "starter_weight": _convert_weight(
+                    float(e["starter_weight"]) * scale, profile.weight_unit
+                ),
+            }
+            for e in filtered
+        ],
+    }
+
+
+async def _get_or_generate_plan(profile: Profile, day_offset: int = 0) -> dict:
+    """
+    Returns a plan dict: {name, duration_min, exercises[]}.
+    Caches by (profile_id, day_offset, date) in `generated_plans` so both
+    /today and /workouts/today share one plan per day and cost one LLM call.
+    """
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+
+    cached = await db.generated_plans.find_one(
+        {
+            "profile_id": profile.id,
+            "day_offset": day_offset,
+            "date": today_iso,
+        },
+        {"_id": 0},
+        sort=[("created_at", -1)],
+    )
+    if cached and cached.get("plan"):
+        return cached["plan"]
+
+    # No cache — try generation, fall back on any failure.
+    recent_docs = (
+        await db.logged_workouts.find(
+            {"profile_id": profile.id}, {"_id": 0}
+        )
+        .sort("created_at", -1)
+        .to_list(3)
+    )
+    recent_typed: List[LoggedWorkout] = []
+    for r in recent_docs:
+        try:
+            recent_typed.append(LoggedWorkout(**r))
+        except Exception:
+            # Malformed historical row — skip, don't let it break generation.
+            continue
+
+    # Allowed name universe (filtered by injuries) for validation.
+    grouped = _pool_after_injuries(profile.injuries or "")
+    allowed_names: set = {
+        ex["name"] for exs in grouped.values() for ex in exs
+    }
+
+    prompt_used = ""
+    raw_resp = ""
+    fallback_used = False
+    plan: dict = {}
+    validation_error: Optional[str] = None
+
+    try:
+        gen = await _generate_workout_for(profile, day_offset, recent_typed)
+        prompt_used = gen["prompt"]
+        raw_resp = gen["raw_response"]
+        candidate = gen["plan"]
+        if _validate_generated_workout(candidate, allowed_names, allowed_categories):
+            plan = candidate
+        else:
+            validation_error = "validation_failed"
+            raise ValueError("Generated plan failed validation")
+    except Exception as e:
+        logger.warning(
+            "Workout generation fell back to template for profile %s: %s",
+            profile.id, e,
+        )
+        fallback_used = True
+        plan = await _fallback_plan_for(profile, day_offset)
+
+    # Audit trail — never exposed to the client. Stores prompt + raw response
+    # + whether we actually used the AI answer or the fallback.
+    await db.generated_plans.insert_one(
+        jsonable_encoder({
+            "id": str(uuid.uuid4()),
+            "profile_id": profile.id,
+            "day_offset": day_offset,
+            "date": today_iso,
+            "prompt": prompt_used,
+            "raw_response": raw_resp,
+            "plan": plan,
+            "fallback_used": fallback_used,
+            "validation_error": validation_error,
+            "created_at": datetime.now(timezone.utc),
+        })
+    )
+
+    return plan
+
+
 def _seed_recent_sessions(profile: Profile) -> List[Session]:
     rnd = random.Random(profile.id)
     sessions: List[Session] = []
@@ -486,10 +890,10 @@ async def get_today(profile_id: str):
     profile = Profile(**profile_doc)
     today = datetime.now(timezone.utc).date()
 
-    tpl = _pick_workout_for(profile, day_offset=0)
+    tpl = await _get_or_generate_plan(profile, day_offset=0)
     workout = TodayWorkout(
         name=tpl["name"],
-        exercises=tpl["exercises"],
+        exercises=len(tpl["exercises"]),
         duration_min=tpl["duration_min"],
     )
 
@@ -564,37 +968,51 @@ async def get_workout_today(profile_id: str):
         raise HTTPException(status_code=404, detail="Profile not found")
     profile = Profile(**profile_doc)
 
-    tpl = _pick_workout_for(profile, day_offset=0)
-    workout_name = tpl["name"]
-    duration_min = tpl["duration_min"]
+    plan = await _get_or_generate_plan(profile, day_offset=0)
+    workout_name = plan["name"]
+    duration_min = plan["duration_min"]
 
-    ex_defs = WORKOUT_EXERCISES.get(workout_name, [])
+    ex_defs = plan["exercises"]  # already unit-converted (kg->display) upstream
 
-    # Most recent prior logged workout with this name (for last_log context).
-    prev = await db.logged_workouts.find_one(
-        {"profile_id": profile_id, "workout_name": workout_name},
-        {"_id": 0},
-        sort=[("created_at", -1)],
-    )
+    # Per-exercise last_log lookup: for each exercise in today's plan, find
+    # the most recent LoggedWorkout by this profile that included that
+    # exercise, regardless of the containing workout's name. This is more
+    # correct for progressive-overload context — the client's last time
+    # doing Back Squat is what matters, not the session it happened inside.
+    plan_ex_names = [ex["name"] for ex in ex_defs]
     prev_by_ex: dict = {}
-    if prev:
-        for ex in prev.get("exercises", []):
-            prev_by_ex[ex["name"]] = ex["sets"]
-        prev_date = prev.get("date", "")
-    else:
-        prev_date = ""
-
-    scale = _experience_scale(profile.experience)
+    prev_date_by_ex: dict = {}
+    if plan_ex_names:
+        prev_docs = (
+            await db.logged_workouts.find(
+                {
+                    "profile_id": profile_id,
+                    "exercises.name": {"$in": plan_ex_names},
+                },
+                {"_id": 0},
+            )
+            .sort("created_at", -1)
+            .to_list(50)
+        )
+        remaining = set(plan_ex_names)
+        for pd in prev_docs:
+            if not remaining:
+                break
+            for ex in pd.get("exercises", []):
+                n = ex.get("name")
+                if n in remaining:
+                    prev_by_ex[n] = ex.get("sets", [])
+                    prev_date_by_ex[n] = pd.get("date", "")
+                    remaining.discard(n)
 
     exercises: List[ExerciseDetail] = []
     for idx, ex in enumerate(ex_defs):
-        base_kg = float(ex["starter_weight"]) * scale
-        starter_display = _convert_weight(base_kg, profile.weight_unit)
+        starter_display = float(ex["starter_weight"])
         last_log_sets_raw = prev_by_ex.get(ex["name"], [])
         last_log = None
         if last_log_sets_raw:
             last_log = LastLog(
-                date=prev_date,
+                date=prev_date_by_ex.get(ex["name"], ""),
                 sets=[LastLogSet(**s) for s in last_log_sets_raw],
             )
         exercises.append(
