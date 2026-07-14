@@ -12,10 +12,11 @@
  * @/src/utils/storage on step-5 confirm and read back here.
  */
 
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useCallback, useEffect, useState } from 'react';
 import {
   ActivityIndicator,
+  Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
@@ -124,6 +125,15 @@ export default function Home() {
     setLoading(true);
     load(profileId).finally(() => setLoading(false));
   }, [profileId, load]);
+
+  // Re-load whenever this screen regains focus (e.g. after logging a meal).
+  useFocusEffect(
+    useCallback(() => {
+      if (profileId) {
+        load(profileId);
+      }
+    }, [profileId, load])
+  );
 
   const onRefresh = useCallback(async () => {
     if (!profileId) return;
@@ -242,7 +252,12 @@ export default function Home() {
 
         {/* 3. Nutrition */}
         <View style={styles.section}>
-          <NutritionBar
+          <Pressable
+            onPress={() => router.push('/nutrition')}
+            testID="home-nutrition-pressable"
+            style={({ pressed }) => (pressed ? styles.nutritionPressed : undefined)}
+          >
+            <NutritionBar
             caloriesConsumed={data.today_nutrition.calories_consumed}
             caloriesTarget={data.today_nutrition.calories_target}
             protein={{
@@ -262,6 +277,7 @@ export default function Home() {
             }}
             testID="home-nutrition"
           />
+          </Pressable>
         </View>
 
         {/* 4. Thread history */}
@@ -311,5 +327,8 @@ const styles = StyleSheet.create({
   errBody: {
     marginBottom: spacing.lg,
     textAlign: 'center',
+  },
+  nutritionPressed: {
+    opacity: 0.7,
   },
 });

@@ -40,3 +40,12 @@ export { SetRow } from './SetRow';
 export type { SetState } from './SetRow';
 export { ExerciseRow } from './ExerciseRow';
 export type { LastLogSet } from './ExerciseRow';
+
+// Nutrition primitives
+export { MealSection, MEAL_TITLES } from './MealSection';
+export type { MealType, MealEntryData } from './MealSection';
+export { FoodRow } from './FoodRow';
+export type { FoodRowData } from './FoodRow';
+export { SearchField } from './SearchField';
+export { QuantitySheet } from './QuantitySheet';
+export type { QuantitySheetFood } from './QuantitySheet';

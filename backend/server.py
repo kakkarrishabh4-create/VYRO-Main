@@ -424,6 +424,9 @@ async def create_profile(payload: ProfileCreate):
     logged_prev = _seed_previous_logged_workouts(profile)
     if logged_prev:
         await db.logged_workouts.insert_many([jsonable_encoder(w) for w in logged_prev])
+    today_meals = _seed_today_meals(profile)
+    if today_meals:
+        await db.logged_meals.insert_many([jsonable_encoder(m) for m in today_meals])
     return profile
 
 
@@ -491,18 +494,8 @@ async def get_today(profile_id: str):
     )
 
     rnd = random.Random(f"{profile.id}:nutrition:{today.isoformat()}")
-    frac = 0.30 + rnd.random() * 0.35
-    t = profile.targets
-    nutrition = TodayNutrition(
-        calories_consumed=int(t.calories * frac),
-        calories_target=t.calories,
-        protein_consumed=int(t.protein_g * (frac + 0.05)),
-        protein_target=t.protein_g,
-        carbs_consumed=int(t.carbs_g * (frac - 0.05)),
-        carbs_target=t.carbs_g,
-        fat_consumed=int(t.fat_g * frac),
-        fat_target=t.fat_g,
-    )
+    nutrition = await _compute_today_nutrition(profile)
+    _ = rnd  # legacy seed retained for other deterministic use
 
     cutoff = (today - timedelta(days=5)).isoformat()
     session_docs = (
@@ -733,6 +726,379 @@ async def complete_workout(profile_id: str, payload: LoggedWorkoutIn):
         previous_sets_completed=prev_sets,
         volume_delta_pct=vol_delta_pct,
         sets_delta=sets_delta,
+    )
+
+
+# ---------------- Nutrition ----------------
+MealType = Literal["breakfast", "lunch", "dinner", "snack"]
+
+# Small hand-curated catalog. Enough range to feel like a real product without
+# pulling in a full USDA CSV. Portion column is a human-readable label; the
+# macros are for exactly that portion (not per-100g) so the "servings" math on
+# the frontend stays simple: qty * (calories, protein, carbs, fat).
+FOOD_CATALOG_RAW = [
+    # id, name, portion, kcal, protein, carbs, fat
+    ("f-001", "Chicken breast, grilled",     "100 g",       165, 31.0, 0.0,  3.6),
+    ("f-002", "Chicken thigh, grilled",      "100 g",       209, 26.0, 0.0, 11.0),
+    ("f-003", "Salmon fillet, baked",        "100 g",       206, 22.0, 0.0, 13.0),
+    ("f-004", "White rice, cooked",          "1 cup (158g)", 205,  4.3, 45.0, 0.4),
+    ("f-005", "Brown rice, cooked",          "1 cup (195g)", 216,  5.0, 45.0, 1.8),
+    ("f-006", "Sweet potato, baked",         "1 medium",     103,  2.3, 24.0, 0.2),
+    ("f-007", "Oatmeal, cooked",             "1 cup",        158,  6.0, 27.0, 3.2),
+    ("f-008", "Rolled oats, dry",            "40 g",         150,  5.0, 27.0, 3.0),
+    ("f-009", "Banana",                      "1 medium",     105,  1.3, 27.0, 0.4),
+    ("f-010", "Apple",                       "1 medium",      95,  0.5, 25.0, 0.3),
+    ("f-011", "Blueberries",                 "1 cup",         84,  1.1, 21.0, 0.5),
+    ("f-012", "Strawberries",                "1 cup",         49,  1.0, 12.0, 0.5),
+    ("f-013", "Greek yogurt, plain 0%",      "170 g",         100, 17.0, 6.0,  0.7),
+    ("f-014", "Greek yogurt, plain 2%",      "170 g",         146, 20.0, 8.0,  4.0),
+    ("f-015", "Cottage cheese, low-fat",     "1 cup",         163, 28.0, 6.0,  2.3),
+    ("f-016", "Milk, whole",                 "1 cup",         149,  8.0, 12.0, 8.0),
+    ("f-017", "Milk, skim",                  "1 cup",          83,  8.0, 12.0, 0.2),
+    ("f-018", "Almond milk, unsweetened",    "1 cup",          30,  1.0,  1.0, 2.5),
+    ("f-019", "Egg, whole",                  "1 large",        72,  6.3, 0.4,  4.8),
+    ("f-020", "Egg whites",                  "3 large",        51, 10.8, 0.7,  0.2),
+    ("f-021", "Peanut butter",               "2 tbsp",         188,  8.0, 6.0, 16.0),
+    ("f-022", "Almond butter",               "2 tbsp",         196,  6.7, 6.6, 18.0),
+    ("f-023", "Almonds",                     "28 g (~23)",     164,  6.0, 6.0, 14.0),
+    ("f-024", "Walnuts",                     "28 g",           185,  4.3, 3.9, 18.5),
+    ("f-025", "Avocado",                     "1/2 fruit",      120,  1.5, 6.4, 11.0),
+    ("f-026", "Olive oil",                   "1 tbsp",         119,  0.0, 0.0, 13.5),
+    ("f-027", "Butter",                      "1 tbsp",         102,  0.1, 0.0, 11.5),
+    ("f-028", "Bread, whole wheat",          "1 slice",         81,  4.0, 14.0, 1.1),
+    ("f-029", "Bagel, plain",                "1 medium",       245, 10.0, 48.0, 1.5),
+    ("f-030", "Tortilla, flour",             "1 (8 in)",       144,  4.0, 24.0, 3.6),
+    ("f-031", "Pasta, cooked",               "1 cup",          220,  8.0, 43.0, 1.3),
+    ("f-032", "Quinoa, cooked",              "1 cup",          222,  8.1, 39.4, 3.6),
+    ("f-033", "Black beans, cooked",         "1 cup",          227, 15.0, 41.0, 0.9),
+    ("f-034", "Lentils, cooked",             "1 cup",          230, 18.0, 40.0, 0.8),
+    ("f-035", "Chickpeas, canned",           "1 cup",          269, 14.5, 45.0, 4.2),
+    ("f-036", "Tofu, firm",                  "100 g",           76,  8.0, 1.9, 4.8),
+    ("f-037", "Tempeh",                      "100 g",          195, 20.3, 7.6, 11.4),
+    ("f-038", "Ground beef, 90/10",          "100 g",          176, 20.0, 0.0, 10.0),
+    ("f-039", "Ground turkey, 93/7",         "100 g",          170, 21.0, 0.0, 9.0),
+    ("f-040", "Cod, baked",                  "100 g",          105, 23.0, 0.0, 0.9),
+    ("f-041", "Shrimp, cooked",              "100 g",           99, 24.0, 0.2, 0.3),
+    ("f-042", "Tuna, canned in water",       "100 g",          116, 25.5, 0.0, 0.8),
+    ("f-043", "Broccoli, cooked",            "1 cup",           55,  3.7, 11.0, 0.6),
+    ("f-044", "Spinach, raw",                "1 cup",            7,  0.9, 1.1, 0.1),
+    ("f-045", "Kale, raw",                   "1 cup",           33,  2.9, 6.7, 0.5),
+    ("f-046", "Bell pepper",                 "1 medium",        24,  1.0, 6.0, 0.2),
+    ("f-047", "Tomato",                      "1 medium",        22,  1.1, 4.8, 0.2),
+    ("f-048", "Cucumber",                    "1 cup sliced",    16,  0.7, 3.8, 0.1),
+    ("f-049", "Mixed greens",                "2 cups",          15,  1.2, 3.0, 0.2),
+    ("f-050", "Carrots, raw",                "1 cup",           50,  1.1, 12.0, 0.3),
+    ("f-051", "Protein shake, whey",         "1 scoop (30g)",  120, 24.0, 3.0,  1.5),
+    ("f-052", "Protein bar",                 "1 bar (60g)",    220, 20.0, 22.0, 7.0),
+    ("f-053", "Coffee, black",               "1 cup",            2,  0.3, 0.0, 0.0),
+    ("f-054", "Latte, whole milk",           "12 oz",          180, 10.0, 15.0, 9.0),
+    ("f-055", "Orange juice",                "1 cup",          112,  1.7, 26.0, 0.5),
+    ("f-056", "Water",                       "1 cup",            0,  0.0, 0.0, 0.0),
+    ("f-057", "Dark chocolate, 70%",         "1 oz (28g)",     170,  2.0, 13.0, 12.0),
+    ("f-058", "Rice cake",                   "1 cake",          35,  0.7, 7.0, 0.3),
+    ("f-059", "Cheddar cheese",              "1 oz",           113,  7.0, 0.4, 9.3),
+    ("f-060", "Mozzarella, part-skim",       "1 oz",            72,  6.9, 0.8, 4.5),
+    ("f-061", "Hummus",                      "2 tbsp",          70,  2.0, 4.0, 5.5),
+    ("f-062", "Honey",                       "1 tbsp",          64,  0.1, 17.0, 0.0),
+    ("f-063", "Peanut M&M's",                "1 fun-size",      93,  1.7, 11.0, 4.7),
+    ("f-064", "Pizza, cheese",               "1 slice",        272, 12.0, 34.0, 10.0),
+    ("f-065", "Sushi roll, salmon avocado",  "8 pieces",       304, 13.0, 42.0, 9.0),
+    ("f-066", "Burrito bowl, chicken",       "1 bowl",         605, 40.0, 65.0, 22.0),
+    ("f-067", "Cesar salad w/ chicken",      "1 bowl",         420, 30.0, 18.0, 26.0),
+    ("f-068", "Turkey sandwich",             "1 sandwich",     360, 27.0, 40.0, 10.0),
+    ("f-069", "Big Mac",                     "1 sandwich",     563, 25.5, 45.0, 33.0),
+    ("f-070", "Diet soda",                   "12 oz can",        0,  0.0, 0.0, 0.0),
+]
+
+
+class FoodItem(BaseModel):
+    id: str
+    name: str
+    portion: str
+    calories: float
+    protein_g: float
+    carbs_g: float
+    fat_g: float
+
+
+FOOD_CATALOG: List[FoodItem] = [
+    FoodItem(
+        id=f[0], name=f[1], portion=f[2],
+        calories=f[3], protein_g=f[4], carbs_g=f[5], fat_g=f[6],
+    )
+    for f in FOOD_CATALOG_RAW
+]
+FOOD_BY_ID = {f.id: f for f in FOOD_CATALOG}
+
+
+class MealEntryIn(BaseModel):
+    food_id: str
+    meal_type: MealType
+    servings: float = Field(gt=0, le=20)
+
+
+class MealEntry(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    profile_id: str
+    date: str
+    meal_type: MealType
+    food_id: str
+    food_name: str
+    portion: str
+    servings: float
+    calories: float
+    protein_g: float
+    carbs_g: float
+    fat_g: float
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+def _build_meal_entry(profile_id: str, food: FoodItem, meal_type: MealType,
+                     servings: float, date_iso: str) -> MealEntry:
+    return MealEntry(
+        profile_id=profile_id,
+        date=date_iso,
+        meal_type=meal_type,
+        food_id=food.id,
+        food_name=food.name,
+        portion=food.portion,
+        servings=round(servings, 2),
+        calories=round(food.calories * servings, 1),
+        protein_g=round(food.protein_g * servings, 1),
+        carbs_g=round(food.carbs_g * servings, 1),
+        fat_g=round(food.fat_g * servings, 1),
+    )
+
+
+def _seed_today_meals(profile: Profile) -> List[MealEntry]:
+    """
+    Give the first-launch nutrition screen something to render. Deterministic
+    per profile so refreshing doesn't shuffle it. Only fires when there's no
+    logged_meals row for today yet.
+    """
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    rnd = random.Random(f"{profile.id}:meals:{today_iso}")
+    picks: List[tuple[str, str, float]] = [
+        (rnd.choice(["f-013", "f-014", "f-008", "f-007"]), "breakfast", 1.0),  # yogurt/oats
+        (rnd.choice(["f-009", "f-010", "f-011"]),          "breakfast", 1.0),  # fruit
+        (rnd.choice(["f-051", "f-053"]),                   "breakfast", 1.0),  # shake/coffee
+    ]
+    # sometimes add a snack
+    if rnd.random() > 0.3:
+        picks.append(
+            (rnd.choice(["f-023", "f-052", "f-058", "f-025"]), "snack", 1.0)
+        )
+    entries: List[MealEntry] = []
+    for fid, mt, srv in picks:
+        f = FOOD_BY_ID.get(fid)
+        if not f:
+            continue
+        entries.append(_build_meal_entry(profile.id, f, mt, srv, today_iso))
+    return entries
+
+
+async def _compute_today_nutrition(profile: Profile) -> "TodayNutrition":
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    docs = await db.logged_meals.find(
+        {"profile_id": profile.id, "date": today_iso},
+        {"_id": 0},
+    ).to_list(500)
+    kcal = sum(d.get("calories", 0) for d in docs)
+    p = sum(d.get("protein_g", 0) for d in docs)
+    c = sum(d.get("carbs_g", 0) for d in docs)
+    f = sum(d.get("fat_g", 0) for d in docs)
+    t = profile.targets
+    return TodayNutrition(
+        calories_consumed=int(round(kcal)),
+        calories_target=t.calories,
+        protein_consumed=int(round(p)),
+        protein_target=t.protein_g,
+        carbs_consumed=int(round(c)),
+        carbs_target=t.carbs_g,
+        fat_consumed=int(round(f)),
+        fat_target=t.fat_g,
+    )
+
+
+# ---------------- Nutrition endpoints ----------------
+class FoodSearchResponse(BaseModel):
+    query: str
+    results: List[FoodItem]
+
+
+@api_router.get("/foods", response_model=FoodSearchResponse)
+async def search_foods(q: str = "", limit: int = 30):
+    query = q.strip().lower()
+    if not query:
+        # Alphabetical slice — same shape as a search response so the frontend
+        # can render an empty-query state without a special code path.
+        return FoodSearchResponse(query="", results=FOOD_CATALOG[:limit])
+
+    scored: List[tuple[int, FoodItem]] = []
+    for f in FOOD_CATALOG:
+        name_l = f.name.lower()
+        if query == name_l:
+            score = 0
+        elif name_l.startswith(query):
+            score = 1
+        elif f" {query}" in f" {name_l}":  # word-boundary contains
+            score = 2
+        elif query in name_l:
+            score = 3
+        else:
+            continue
+        scored.append((score, f))
+    scored.sort(key=lambda t: (t[0], t[1].name.lower()))
+    return FoodSearchResponse(query=q, results=[f for _, f in scored[:limit]])
+
+
+class RecentFood(BaseModel):
+    food: FoodItem
+    last_used: datetime
+    log_count: int  # how many times ever logged — proxy for "favorite"
+
+
+class RecentFoodsResponse(BaseModel):
+    profile_id: str
+    recent: List[RecentFood]
+
+
+@api_router.get(
+    "/profiles/{profile_id}/foods/recent",
+    response_model=RecentFoodsResponse,
+)
+async def get_recent_foods(profile_id: str, limit: int = 8):
+    profile_doc = await db.profiles.find_one({"id": profile_id}, {"_id": 0})
+    if not profile_doc:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    # Group logged_meals by food_id and pick out most recent + total count.
+    pipeline = [
+        {"$match": {"profile_id": profile_id}},
+        {
+            "$group": {
+                "_id": "$food_id",
+                "last_used": {"$max": "$created_at"},
+                "log_count": {"$sum": 1},
+            }
+        },
+        {"$sort": {"last_used": -1}},
+        {"$limit": max(limit, 1)},
+    ]
+    grouped = await db.logged_meals.aggregate(pipeline).to_list(limit)
+    recent: List[RecentFood] = []
+    for g in grouped:
+        f = FOOD_BY_ID.get(g["_id"])
+        if not f:
+            continue
+        # last_used may come back as a plain datetime or an ISO-8601 string
+        # (motor is content to store either). Normalize to datetime so the
+        # Pydantic model's serializer is happy either way.
+        lu_raw = g["last_used"]
+        if isinstance(lu_raw, datetime):
+            lu = lu_raw
+        else:
+            try:
+                lu = datetime.fromisoformat(str(lu_raw).replace("Z", "+00:00"))
+            except Exception:
+                lu = datetime.now(timezone.utc)
+        recent.append(RecentFood(food=f, last_used=lu, log_count=g["log_count"]))
+    return RecentFoodsResponse(profile_id=profile_id, recent=recent)
+
+
+@api_router.post(
+    "/profiles/{profile_id}/meals",
+    response_model=MealEntry,
+)
+async def log_meal(profile_id: str, payload: MealEntryIn):
+    profile_doc = await db.profiles.find_one({"id": profile_id}, {"_id": 0})
+    if not profile_doc:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    food = FOOD_BY_ID.get(payload.food_id)
+    if not food:
+        raise HTTPException(status_code=404, detail="Food not found")
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    entry = _build_meal_entry(profile_id, food, payload.meal_type, payload.servings, today_iso)
+    await db.logged_meals.insert_one(jsonable_encoder(entry))
+    return entry
+
+
+@api_router.delete("/profiles/{profile_id}/meals/{meal_id}")
+async def delete_meal(profile_id: str, meal_id: str):
+    result = await db.logged_meals.delete_one(
+        {"id": meal_id, "profile_id": profile_id}
+    )
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Meal not found")
+    return {"ok": True, "id": meal_id}
+
+
+class MealGroup(BaseModel):
+    meal_type: MealType
+    entries: List[MealEntry]
+    subtotal_calories: int
+    subtotal_protein: int
+    subtotal_carbs: int
+    subtotal_fat: int
+
+
+class NutritionTodayResponse(BaseModel):
+    profile_id: str
+    date: str
+    nutrition: TodayNutrition
+    meals: List[MealGroup]
+
+
+MEAL_ORDER: List[MealType] = ["breakfast", "lunch", "dinner", "snack"]
+
+
+@api_router.get(
+    "/profiles/{profile_id}/nutrition/today",
+    response_model=NutritionTodayResponse,
+)
+async def get_nutrition_today(profile_id: str):
+    profile_doc = await db.profiles.find_one({"id": profile_id}, {"_id": 0})
+    if not profile_doc:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    profile = Profile(**profile_doc)
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+
+    docs = (
+        await db.logged_meals.find(
+            {"profile_id": profile_id, "date": today_iso},
+            {"_id": 0},
+        )
+        .sort("created_at", 1)
+        .to_list(500)
+    )
+
+    grouped: dict = {mt: [] for mt in MEAL_ORDER}
+    for d in docs:
+        mt = d.get("meal_type", "snack")
+        if mt not in grouped:
+            grouped[mt] = []
+        grouped[mt].append(MealEntry(**d))
+
+    meal_groups: List[MealGroup] = []
+    for mt in MEAL_ORDER:
+        entries = grouped.get(mt, [])
+        meal_groups.append(
+            MealGroup(
+                meal_type=mt,
+                entries=entries,
+                subtotal_calories=int(round(sum(e.calories for e in entries))),
+                subtotal_protein=int(round(sum(e.protein_g for e in entries))),
+                subtotal_carbs=int(round(sum(e.carbs_g for e in entries))),
+                subtotal_fat=int(round(sum(e.fat_g for e in entries))),
+            )
+        )
+
+    nutrition = await _compute_today_nutrition(profile)
+    return NutritionTodayResponse(
+        profile_id=profile_id,
+        date=today_iso,
+        nutrition=nutrition,
+        meals=meal_groups,
     )
 
 
